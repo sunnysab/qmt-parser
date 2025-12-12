@@ -11,7 +11,7 @@ const RECORD_SIZE: usize = 144;
 const PRICE_SCALE: f64 = 1000.0;
 const CALL_AUCTION_PHASE_CODE: u32 = 12;
 
-/// Level 1: 原始 Tick 结构体
+/// Level 1: 原始 Tick 结构体 (定长数组)
 #[derive(Debug, Clone)]
 pub struct TickData {
     pub date: String,
@@ -21,10 +21,10 @@ pub struct TickData {
     pub last_close: f64,
     pub amount: Option<f64>,
     pub volume: Option<u64>,
-    pub ask_prices: Vec<Option<f64>>,
-    pub ask_vols: Vec<Option<u32>>,
-    pub bid_prices: Vec<Option<f64>>,
-    pub bid_vols: Vec<Option<u32>>,
+    pub ask_prices: [Option<f64>; 5],
+    pub ask_vols: [Option<u32>; 5],
+    pub bid_prices: [Option<f64>; 5],
+    pub bid_vols: [Option<u32>; 5],
     pub qmt_status_field_1_raw: u32,
     pub qmt_status_field_2_raw: u32,
 }
@@ -151,10 +151,10 @@ pub fn parse_ticks_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame> {
         qmt_status_1.push(tick.qmt_status_field_1_raw);
         qmt_status_2.push(tick.qmt_status_field_2_raw);
 
-        ask_price_builder.append_iter(tick.ask_prices.into_iter());
-        ask_vol_builder.append_iter(tick.ask_vols.into_iter());
-        bid_price_builder.append_iter(tick.bid_prices.into_iter());
-        bid_vol_builder.append_iter(tick.bid_vols.into_iter());
+        ask_price_builder.append_iter(tick.ask_prices.iter().copied());
+        ask_vol_builder.append_iter(tick.ask_vols.iter().copied());
+        bid_price_builder.append_iter(tick.bid_prices.iter().copied());
+        bid_vol_builder.append_iter(tick.bid_vols.iter().copied());
     }
 
     if dates.is_empty() {
@@ -246,18 +246,18 @@ fn parse_single_record(cursor: &mut Cursor<&[u8]>, date_str: &str) -> std::io::R
         last_price: None,
         amount: None,
         volume: None,
-        ask_prices: vec![None; 5],
-        ask_vols: vec![None; 5],
-        bid_prices: vec![None; 5],
-        bid_vols: vec![None; 5],
+        ask_prices: [None; 5],
+        ask_vols: [None; 5],
+        bid_prices: [None; 5],
+        bid_vols: [None; 5],
     };
 
     if market_phase_status == CALL_AUCTION_PHASE_CODE {
         tick.last_price = Some(0.0);
         tick.amount = Some(0.0);
         tick.volume = Some(0);
-        tick.ask_vols = vec![Some(0); 5];
-        tick.bid_vols = vec![Some(0); 5];
+        tick.ask_vols = [Some(0); 5];
+        tick.bid_vols = [Some(0); 5];
         cursor.set_position(64);
         let ref_price = cursor.read_u32::<LittleEndian>()? as f64 / PRICE_SCALE;
         tick.ask_prices[0] = Some(ref_price);
