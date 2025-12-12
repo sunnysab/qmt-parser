@@ -1,41 +1,129 @@
 use std::fs::File;
-use std::io::{BufReader, Read, Cursor};
+use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
+
+use anyhow::Result;
 use byteorder::{LittleEndian, ReadBytesExt};
-use anyhow::{Context, Result, anyhow};
+use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone};
+use polars::datatypes::PlSmallStr;
 use polars::prelude::*;
-use chrono::{NaiveDate, DateTime, FixedOffset, TimeZone};
+use thiserror::Error;
 
 const RECORD_SIZE: usize = 64;
 const PRICE_SCALE: f64 = 1000.0;
 const AMOUNT_SCALE: f64 = 100.0;
 
-/// 解析 QMT 日线数据 (.dat)
-pub fn parse_daily_kline(
+/// Level 1: 日线原始结构
+#[derive(Debug, Clone)]
+pub struct DailyKlineData {
+    pub timestamp_ms: i64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: u32,
+    pub amount: f64,
+    pub open_interest: u32,
+    pub file_pre_close: f64,
+}
+
+#[derive(Error, Debug)]
+pub enum ParseError {
+    #[error("文件路径不能为空")]
+    EmptyPath,
+    #[error("文件必须是.dat或.DAT格式: {0}")]
+    InvalidExtension(String),
+    #[error("开始日期格式错误: {0}")]
+    InvalidStartDate(String),
+    #[error("结束日期格式错误: {0}")]
+    InvalidEndDate(String),
+    #[error("无效的时间戳")]
+    InvalidTimestamp,
+    #[error("IO错误: {0}")]
+    Io(#[from] std::io::Error),
+}
+
+/// Level 2: 日线 Reader，仅做原始读取与日期过滤
+pub struct DailyReader<R: Read> {
+    reader: BufReader<R>,
+    buffer: [u8; RECORD_SIZE],
+    start: Option<NaiveDate>,
+    end: Option<NaiveDate>,
+    tz_offset: FixedOffset,
+}
+
+impl DailyReader<File> {
+    pub fn from_path(
+        path: impl AsRef<Path>,
+        start: Option<NaiveDate>,
+        end: Option<NaiveDate>,
+    ) -> Result<Self, ParseError> {
+        let path = path.as_ref();
+        validate_dat_path(path)?;
+        let file = File::open(path)?;
+        Ok(Self::new(file, start, end))
+    }
+}
+
+impl<R: Read> DailyReader<R> {
+    pub fn new(reader: R, start: Option<NaiveDate>, end: Option<NaiveDate>) -> Self {
+        DailyReader {
+            reader: BufReader::new(reader),
+            buffer: [0u8; RECORD_SIZE],
+            start,
+            end,
+            tz_offset: FixedOffset::east_opt(8 * 3600).expect("valid offset"),
+        }
+    }
+}
+
+impl<R: Read> Iterator for DailyReader<R> {
+    type Item = Result<DailyKlineData, ParseError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        loop {
+            if let Err(err) = self.reader.read_exact(&mut self.buffer) {
+                if err.kind() == std::io::ErrorKind::UnexpectedEof {
+                    return None;
+                }
+                return Some(Err(ParseError::Io(err)));
+            }
+
+            let mut cursor = Cursor::new(&self.buffer[..]);
+            match parse_record(&mut cursor, self.start, self.end, self.tz_offset) {
+                Ok(Some(record)) => return Some(Ok(record)),
+                Ok(None) => continue, // 过滤掉不在时间范围内的记录
+                Err(e) => return Some(Err(e)),
+            }
+        }
+    }
+}
+
+/// Level 3 API: Vec<Struct>
+pub fn parse_daily_to_structs(
     path: impl AsRef<Path>,
     start_date_str: &str,
-    end_date_str: &str
-) -> Result<DataFrame> {
-    let path = path.as_ref();
-
-    // 0. 解析日期参数
-    let start_date = NaiveDate::parse_from_str(start_date_str, "%Y%m%d")
-        .map_err(|e| anyhow!("开始日期格式错误: {}", e))?;
-    let end_date = NaiveDate::parse_from_str(end_date_str, "%Y%m%d")
-        .map_err(|e| anyhow!("结束日期格式错误: {}", e))?;
-
-    // 1. 预计算行数
-    let file_len = std::fs::metadata(path)
-        .with_context(|| format!("无法获取文件元数据: {}", path.display()))?
-        .len();
-
-    if file_len == 0 {
-        return Ok(DataFrame::empty());
+    end_date_str: &str,
+) -> Result<Vec<DailyKlineData>> {
+    let path_ref = path.as_ref();
+    let start = parse_date(start_date_str).map_err(|e| ParseError::InvalidStartDate(e))?;
+    let end = parse_date(end_date_str).map_err(|e| ParseError::InvalidEndDate(e))?;
+    let mut reader = DailyReader::from_path(path_ref, Some(start), Some(end))?;
+    let mut out = Vec::with_capacity(estimate_rows(path_ref)?);
+    for item in &mut reader {
+        out.push(item?);
     }
+    Ok(out)
+}
 
-    let estimated_rows = (file_len as usize) / RECORD_SIZE;
+/// Level 3 API: DataFrame（在 Lazy 端处理业务逻辑）
+pub fn parse_daily_to_dataframe(path: impl AsRef<Path>, start_date_str: &str, end_date_str: &str) -> Result<DataFrame> {
+    let path_ref = path.as_ref();
+    let start = parse_date(start_date_str).map_err(|e| ParseError::InvalidStartDate(e))?;
+    let end = parse_date(end_date_str).map_err(|e| ParseError::InvalidEndDate(e))?;
+    let mut reader = DailyReader::from_path(path_ref, Some(start), Some(end))?;
 
-    // 2. 初始化列向量
+    let estimated_rows = estimate_rows(path_ref)?;
     let mut timestamps = Vec::with_capacity(estimated_rows);
     let mut opens = Vec::with_capacity(estimated_rows);
     let mut highs = Vec::with_capacity(estimated_rows);
@@ -46,64 +134,23 @@ pub fn parse_daily_kline(
     let mut open_interests = Vec::with_capacity(estimated_rows);
     let mut file_pre_closes = Vec::with_capacity(estimated_rows);
 
-    // 3. 打开文件
-    let file = File::open(path).with_context(|| format!("无法打开文件: {}", path.display()))?;
-    let mut reader = BufReader::new(file);
-    let mut buffer = [0u8; RECORD_SIZE];
-
-    // 用于时区转换 (QMT 时间戳是 UTC，需要转为 +8 才能正确判断日期)
-    let tz_offset = FixedOffset::east_opt(8 * 3600).unwrap();
-
-    // 4. 解析循环
-    while let Ok(()) = reader.read_exact(&mut buffer) {
-        let mut cursor = Cursor::new(&buffer[..]);
-
-        // Offset 8: Unix时间戳 (u32)
-        cursor.set_position(8);
-        let ts_seconds = cursor.read_u32::<LittleEndian>()?;
-
-        // --- 日期过滤逻辑 ---
-        // 修复: 使用 DateTime::from_timestamp 替代 deprecated 的 NaiveDateTime::from_timestamp_opt
-        let dt_utc = DateTime::from_timestamp(ts_seconds as i64, 0)
-            .ok_or_else(|| anyhow!("无效的时间戳"))?
-            .naive_utc(); // 转为 NaiveDateTime 用于后续转换
-
-        let current_date = tz_offset.from_utc_datetime(&dt_utc).date_naive();
-
-        if current_date < start_date || current_date > end_date {
-            continue;
-        }
-
-        timestamps.push(ts_seconds as i64 * 1000); // 存毫秒
-
-        // Offset 12..28: OHLC (除以 1000.0)
-        opens.push(cursor.read_u32::<LittleEndian>()? as f64 / PRICE_SCALE);
-        highs.push(cursor.read_u32::<LittleEndian>()? as f64 / PRICE_SCALE);
-        lows.push(cursor.read_u32::<LittleEndian>()? as f64 / PRICE_SCALE);
-        closes.push(cursor.read_u32::<LittleEndian>()? as f64 / PRICE_SCALE);
-
-        // Offset 32: Volume
-        cursor.set_position(32);
-        volumes.push(cursor.read_u32::<LittleEndian>()?);
-
-        // Offset 40: Amount (日线除以 100.0)
-        cursor.set_position(40);
-        let raw_amount = cursor.read_u64::<LittleEndian>()?;
-        amounts.push(raw_amount as f64 / AMOUNT_SCALE);
-
-        // Offset 48: Open Interest
-        open_interests.push(cursor.read_u32::<LittleEndian>()?);
-
-        // Offset 60: Pre Close (文件原始值)
-        cursor.set_position(60);
-        file_pre_closes.push(cursor.read_u32::<LittleEndian>()? as f64 / PRICE_SCALE);
+    for item in &mut reader {
+        let record = item?;
+        timestamps.push(record.timestamp_ms);
+        opens.push(record.open);
+        highs.push(record.high);
+        lows.push(record.low);
+        closes.push(record.close);
+        volumes.push(record.volume);
+        amounts.push(record.amount);
+        open_interests.push(record.open_interest);
+        file_pre_closes.push(record.file_pre_close);
     }
 
     if timestamps.is_empty() {
         return Ok(DataFrame::empty());
     }
 
-    // 5. 构建基础 DataFrame
     let df = df![
         "timestamp_ms" => timestamps,
         "open" => opens,
@@ -116,44 +163,130 @@ pub fn parse_daily_kline(
         "file_preClose" => file_pre_closes,
     ]?;
 
-    // 6. 业务逻辑处理 (LazyFrame)
-    let df_final = df.lazy()
-        // 修复: sort 必须传数组/切片
+    let raw_tz = polars::prelude::TimeZone::opt_try_new(None::<PlSmallStr>)?;
+    let china_tz = polars::prelude::TimeZone::opt_try_new(Some("Asia/Shanghai"))?;
+    let df_final = df
+        .lazy()
         .sort(["timestamp_ms"], Default::default())
-
         .with_column(
             (col("volume").eq(lit(0)).and(col("amount").eq(lit(0.0))))
                 .cast(DataType::Int32)
-                .alias("suspendFlag")
+                .alias("suspendFlag"),
         )
-        // 修复: shift 现在接收 Expr，需要用 lit(1)
-        .with_column(
-            col("close").shift(lit(1)).alias("calc_pre_close")
-        )
+        .with_column(col("close").shift(lit(1)).alias("calc_pre_close"))
         .with_column(
             when(col("suspendFlag").eq(lit(1)))
                 .then(col("close"))
-                .otherwise(
-                    col("calc_pre_close").fill_null(col("close"))
-                )
-                .alias("preClose")
+                .otherwise(col("calc_pre_close").fill_null(col("close")))
+                .alias("preClose"),
         )
-        // 修复: 时区转换不再需要 TimeZone trait 对象，直接传字符串
         .with_columns(vec![
             col("timestamp_ms")
-                .cast(DataType::Datetime(TimeUnit::Milliseconds, None)) // 先转 UTC
-                .dt().convert_time_zone(polars::prelude::TimeZone::opt_try_new("Asia/Shanghai".into())?.unwrap())         // 再转上海时间
+                .cast(DataType::Datetime(TimeUnit::Milliseconds, raw_tz))
+                .dt()
+                .convert_time_zone(china_tz.unwrap())
                 .alias("time"),
-            lit(0.0).alias("settlementPrice")
+            lit(0.0).alias("settlementPrice"),
         ])
         .select([
-            col("time"), col("open"), col("high"), col("low"), col("close"),
-            col("volume"), col("amount"), col("settlementPrice"),
-            col("openInterest"), col("preClose"), col("suspendFlag")
+            col("time"),
+            col("open"),
+            col("high"),
+            col("low"),
+            col("close"),
+            col("volume"),
+            col("amount"),
+            col("settlementPrice"),
+            col("openInterest"),
+            col("preClose"),
+            col("suspendFlag"),
         ])
         .collect()?;
 
     Ok(df_final)
+}
+
+fn validate_dat_path(path: &Path) -> Result<(), ParseError> {
+    if path.as_os_str().is_empty() {
+        return Err(ParseError::EmptyPath);
+    }
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if ext != "dat" {
+        return Err(ParseError::InvalidExtension(path.display().to_string()));
+    }
+    Ok(())
+}
+
+fn estimate_rows(path: &Path) -> Result<usize> {
+    let file_len = std::fs::metadata(path)?.len();
+    Ok((file_len as usize) / RECORD_SIZE + 1)
+}
+
+fn parse_date(date: &str) -> std::result::Result<NaiveDate, String> {
+    NaiveDate::parse_from_str(date, "%Y%m%d").map_err(|e| e.to_string())
+}
+
+fn parse_record(
+    cursor: &mut Cursor<&[u8]>,
+    start: Option<NaiveDate>,
+    end: Option<NaiveDate>,
+    tz_offset: FixedOffset,
+) -> Result<Option<DailyKlineData>, ParseError> {
+    cursor.set_position(8);
+    let ts_seconds = cursor.read_u32::<LittleEndian>()?;
+    let dt_utc = DateTime::from_timestamp(ts_seconds as i64, 0)
+        .ok_or(ParseError::InvalidTimestamp)?
+        .naive_utc();
+
+    let current_date = tz_offset.from_utc_datetime(&dt_utc).date_naive();
+    if let Some(start) = start {
+        if current_date < start {
+            return Ok(None);
+        }
+    }
+    if let Some(end) = end {
+        if current_date > end {
+            return Ok(None);
+        }
+    }
+
+    let open = cursor.read_u32::<LittleEndian>()? as f64 / PRICE_SCALE;
+    let high = cursor.read_u32::<LittleEndian>()? as f64 / PRICE_SCALE;
+    let low = cursor.read_u32::<LittleEndian>()? as f64 / PRICE_SCALE;
+    let close = cursor.read_u32::<LittleEndian>()? as f64 / PRICE_SCALE;
+
+    cursor.set_position(32);
+    let volume = cursor.read_u32::<LittleEndian>()?;
+
+    cursor.set_position(40);
+    let raw_amount = cursor.read_u64::<LittleEndian>()?;
+    let amount = raw_amount as f64 / AMOUNT_SCALE;
+
+    let open_interest = cursor.read_u32::<LittleEndian>()?;
+
+    cursor.set_position(60);
+    let file_pre_close = cursor.read_u32::<LittleEndian>()? as f64 / PRICE_SCALE;
+
+    Ok(Some(DailyKlineData {
+        timestamp_ms: ts_seconds as i64 * 1000,
+        open,
+        high,
+        low,
+        close,
+        volume,
+        amount,
+        open_interest,
+        file_pre_close,
+    }))
+}
+
+/// 兼容旧命名
+pub fn parse_daily_kline(path: impl AsRef<Path>, start_date_str: &str, end_date_str: &str) -> Result<DataFrame> {
+    parse_daily_to_dataframe(path, start_date_str, end_date_str)
 }
 
 #[cfg(test)]
@@ -173,14 +306,13 @@ mod tests {
         let start = "19910401";
         let end = "19910425";
 
-        let df = parse_daily_kline(&daily_path, start, end)?;
+        let df = parse_daily_to_dataframe(&daily_path, start, end)?;
 
         println!("--- Daily DataFrame (Shape: {:?}) ---", df.shape());
         println!("{}", df);
 
         if df.height() > 0 {
             let cols = df.get_column_names();
-            // 修复: PlSmallStr 类型不匹配问题，使用 iter().any() 检查
             assert!(cols.iter().any(|c| c.as_str() == "suspendFlag"));
             assert!(cols.iter().any(|c| c.as_str() == "preClose"));
 

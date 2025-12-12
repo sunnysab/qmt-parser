@@ -1,30 +1,98 @@
 use std::fs::File;
-use std::io::{BufReader, Read, Cursor};
+use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
+
+use anyhow::Result;
 use byteorder::{LittleEndian, ReadBytesExt};
-use anyhow::{Context, Result};
-use polars::prelude::*;
 use polars::datatypes::PlSmallStr;
+use polars::prelude::*;
+use thiserror::Error;
 
 const RECORD_SIZE: usize = 64;
 const PRICE_SCALE: f64 = 1000.0;
 
-/// 解析 1分钟 K线数据 (.dat) 到 Polars DataFrame
-pub fn parse_kline_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame> {
-    let path = path.as_ref();
+/// Level 1: 1分钟线结构体
+#[derive(Debug, Clone)]
+pub struct MinKlineData {
+    pub timestamp_ms: i64,
+    pub open: f64,
+    pub high: f64,
+    pub low: f64,
+    pub close: f64,
+    pub volume: u32,
+    pub amount: f64,
+    pub open_interest: u32,
+    pub pre_close: f64,
+}
 
-    // 1. 预计算行数
-    let file_len = std::fs::metadata(path)
-        .with_context(|| format!("无法获取文件元数据: {}", path.display()))?
-        .len();
+#[derive(Error, Debug)]
+pub enum ParseError {
+    #[error("文件路径不能为空")]
+    EmptyPath,
+    #[error("文件必须是.dat格式: {0}")]
+    InvalidExtension(String),
+    #[error("IO错误: {0}")]
+    Io(#[from] std::io::Error),
+}
 
-    if file_len == 0 {
-        return Ok(DataFrame::empty());
+/// Level 2: Reader 迭代器
+pub struct MinReader<R: Read> {
+    reader: BufReader<R>,
+    buffer: [u8; RECORD_SIZE],
+}
+
+impl MinReader<File> {
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, ParseError> {
+        let path = path.as_ref();
+        validate_dat_path(path)?;
+        let file = File::open(path)?;
+        Ok(Self::new(file))
     }
+}
 
-    let estimated_rows = (file_len as usize) / RECORD_SIZE;
+impl<R: Read> MinReader<R> {
+    pub fn new(reader: R) -> Self {
+        MinReader {
+            reader: BufReader::new(reader),
+            buffer: [0u8; RECORD_SIZE],
+        }
+    }
+}
 
-    // 2. 初始化列向量
+impl<R: Read> Iterator for MinReader<R> {
+    type Item = Result<MinKlineData, ParseError>;
+
+    fn next(&mut self) -> Option<Self::Item> {
+        if let Err(err) = self.reader.read_exact(&mut self.buffer) {
+            if err.kind() == std::io::ErrorKind::UnexpectedEof {
+                return None;
+            }
+            return Some(Err(ParseError::Io(err)));
+        }
+
+        let mut cursor = Cursor::new(&self.buffer[..]);
+        Some(parse_record(&mut cursor).map_err(ParseError::Io))
+    }
+}
+
+/// Level 3 API: Vec<Struct>
+pub fn parse_min_to_structs(path: impl AsRef<Path>) -> Result<Vec<MinKlineData>> {
+    let path_ref = path.as_ref();
+    let mut reader = MinReader::from_path(path_ref)?;
+    let estimated_rows = estimate_rows(path_ref)?;
+    let mut out = Vec::with_capacity(estimated_rows);
+    for item in &mut reader {
+        out.push(item?);
+    }
+    Ok(out)
+}
+
+/// Level 3 API: DataFrame
+pub fn parse_min_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame> {
+    let path_ref = path.as_ref();
+    let mut reader = MinReader::from_path(path_ref)?;
+    let estimated_rows = estimate_rows(path_ref)?;
+
     let mut timestamps = Vec::with_capacity(estimated_rows);
     let mut opens = Vec::with_capacity(estimated_rows);
     let mut highs = Vec::with_capacity(estimated_rows);
@@ -35,47 +103,23 @@ pub fn parse_kline_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame> {
     let mut open_interests = Vec::with_capacity(estimated_rows);
     let mut pre_closes = Vec::with_capacity(estimated_rows);
 
-    // 3. 打开文件读取
-    let file = File::open(path).with_context(|| format!("无法打开文件: {}", path.display()))?;
-    let mut reader = BufReader::new(file);
-    let mut buffer = [0u8; RECORD_SIZE];
-
-    // 4. 解析循环
-    while let Ok(()) = reader.read_exact(&mut buffer) {
-        let mut cursor = Cursor::new(&buffer[..]);
-
-        // Offset 8: Unix时间戳 (u32)
-        cursor.set_position(8);
-        let ts_seconds = cursor.read_u32::<LittleEndian>()?;
-        timestamps.push(ts_seconds as i64 * 1000); // 转毫秒
-
-        // Offset 12..28: OHLC
-        opens.push(cursor.read_u32::<LittleEndian>()? as f64 / PRICE_SCALE);
-        highs.push(cursor.read_u32::<LittleEndian>()? as f64 / PRICE_SCALE);
-        lows.push(cursor.read_u32::<LittleEndian>()? as f64 / PRICE_SCALE);
-        closes.push(cursor.read_u32::<LittleEndian>()? as f64 / PRICE_SCALE);
-
-        // Offset 32: Volume
-        cursor.set_position(32);
-        volumes.push(cursor.read_u32::<LittleEndian>()?);
-
-        // Offset 40: Amount
-        cursor.set_position(40);
-        amounts.push(cursor.read_u64::<LittleEndian>()? as f64);
-
-        // Offset 48: Open Interest
-        open_interests.push(cursor.read_u32::<LittleEndian>()?);
-
-        // Offset 60: Pre Close
-        cursor.set_position(60);
-        pre_closes.push(cursor.read_u32::<LittleEndian>()? as f64 / PRICE_SCALE);
+    for item in &mut reader {
+        let record = item?;
+        timestamps.push(record.timestamp_ms);
+        opens.push(record.open);
+        highs.push(record.high);
+        lows.push(record.low);
+        closes.push(record.close);
+        volumes.push(record.volume);
+        amounts.push(record.amount);
+        open_interests.push(record.open_interest);
+        pre_closes.push(record.pre_close);
     }
 
     if timestamps.is_empty() {
         return Ok(DataFrame::empty());
     }
 
-    // 5. 构建 DataFrame
     let len = timestamps.len();
     let settlement_prices = Series::new("settlementPrice".into(), vec![0.0f64; len]);
     let suspend_flags = Series::new("suspendFlag".into(), vec![0i32; len]);
@@ -94,30 +138,85 @@ pub fn parse_kline_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame> {
         "suspendFlag" => suspend_flags,
     ]?;
 
-    // 6. 处理时间列
-    // 逻辑：
-    // a. 原始数据是 Unix Timestamp (UTC)
-    // b. cast 声明它是 UTC 时间
-    // c. convert_time_zone 转换为 上海时间 (UTC+8)
     let raw_tz = TimeZone::opt_try_new(None::<PlSmallStr>)?;
     let china_tz = TimeZone::opt_try_new(Some("Asia/Shanghai"))?;
-    let df = df.lazy()
+    let df = df
+        .lazy()
         .with_column(
             col("timestamp_ms")
                 .cast(DataType::Datetime(TimeUnit::Milliseconds, raw_tz))
-                .dt().convert_time_zone(
-                china_tz.unwrap()
-            )
-                .alias("time")
+                .dt()
+                .convert_time_zone(china_tz.unwrap())
+                .alias("time"),
         )
         .select([
-            col("time"), col("open"), col("high"), col("low"), col("close"),
-            col("volume"), col("amount"), col("settlementPrice"),
-            col("openInterest"), col("preClose"), col("suspendFlag")
+            col("time"),
+            col("open"),
+            col("high"),
+            col("low"),
+            col("close"),
+            col("volume"),
+            col("amount"),
+            col("settlementPrice"),
+            col("openInterest"),
+            col("preClose"),
+            col("suspendFlag"),
         ])
         .collect()?;
 
     Ok(df)
+}
+
+fn validate_dat_path(path: &Path) -> Result<(), ParseError> {
+    if path.as_os_str().is_empty() {
+        return Err(ParseError::EmptyPath);
+    }
+    if path.extension().and_then(|s| s.to_str()) != Some("dat") {
+        return Err(ParseError::InvalidExtension(path.display().to_string()));
+    }
+    Ok(())
+}
+
+fn estimate_rows(path: &Path) -> Result<usize> {
+    let file_len = std::fs::metadata(path)?.len();
+    Ok((file_len as usize) / RECORD_SIZE + 1)
+}
+
+fn parse_record(cursor: &mut Cursor<&[u8]>) -> std::io::Result<MinKlineData> {
+    cursor.set_position(8);
+    let ts_seconds = cursor.read_u32::<LittleEndian>()?;
+    let open = cursor.read_u32::<LittleEndian>()? as f64 / PRICE_SCALE;
+    let high = cursor.read_u32::<LittleEndian>()? as f64 / PRICE_SCALE;
+    let low = cursor.read_u32::<LittleEndian>()? as f64 / PRICE_SCALE;
+    let close = cursor.read_u32::<LittleEndian>()? as f64 / PRICE_SCALE;
+
+    cursor.set_position(32);
+    let volume = cursor.read_u32::<LittleEndian>()?;
+
+    cursor.set_position(40);
+    let amount = cursor.read_u64::<LittleEndian>()? as f64;
+
+    let open_interest = cursor.read_u32::<LittleEndian>()?;
+
+    cursor.set_position(60);
+    let pre_close = cursor.read_u32::<LittleEndian>()? as f64 / PRICE_SCALE;
+
+    Ok(MinKlineData {
+        timestamp_ms: ts_seconds as i64 * 1000,
+        open,
+        high,
+        low,
+        close,
+        volume,
+        amount,
+        open_interest,
+        pre_close,
+    })
+}
+
+/// 向后兼容旧命名
+pub fn parse_kline_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame> {
+    parse_min_to_dataframe(path)
 }
 
 #[cfg(test)]
@@ -129,7 +228,7 @@ mod tests {
     fn test_parse_kline_dataframe() -> Result<()> {
         let test_file = PathBuf::from("data/000000-1m.dat");
 
-        let df = parse_kline_to_dataframe(&test_file)?;
+        let df = parse_min_to_dataframe(&test_file)?;
 
         println!("--- Tail ---");
         println!("{}", df.tail(Some(5)));

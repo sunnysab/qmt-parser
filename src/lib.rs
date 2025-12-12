@@ -1,14 +1,14 @@
 //! src/lib.rs
 
+pub mod day;
+pub mod min;
 pub mod tick;
 
-pub mod min;
-mod day;
+// 顶层 API 重导出，简化调用
+pub use tick::{ParseError as TickParseError, TickData, TickReader, parse_ticks_to_dataframe, parse_ticks_to_structs};
 
-// 将 tick 模块中的公共项目重新导出，作为库的顶层API
-pub use tick::{
-    parse_ticks_to_dataframe,
-    parse_ticks_to_structs,
-    TickData,
-    ParseError
+pub use min::{MinKlineData, MinReader, ParseError as MinParseError, parse_min_to_dataframe, parse_min_to_structs};
+
+pub use day::{
+    DailyKlineData, DailyReader, ParseError as DailyParseError, parse_daily_to_dataframe, parse_daily_to_structs,
 };
