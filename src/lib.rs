@@ -3,6 +3,7 @@
 pub mod tick;
 
 pub mod min;
+mod day;
 
 // 将 tick 模块中的公共项目重新导出，作为库的顶层API
 pub use tick::{
