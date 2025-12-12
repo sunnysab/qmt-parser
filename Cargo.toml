@@ -1,0 +1,13 @@
+[package]
+name = "qmt-parser"
+version = "0.1.0"
+edition.workspace = true
+authors.workspace = true
+license.workspace = true
+rust-version.workspace = true
+
+[dependencies]
+polars = { version = "0.52", features = ["lazy", "timezones"] }
+anyhow = "1"
+byteorder = "1.5"
+thiserror = "2"
