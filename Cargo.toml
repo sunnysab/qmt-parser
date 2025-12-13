@@ -11,3 +11,4 @@ polars = { version = "0.52", features = ["lazy", "timezones"] }
 byteorder = "1.5"
 thiserror = "2"
 chrono = "0.4.42"
+rusty-leveldb = "1.0"
