@@ -2,12 +2,11 @@ use std::fs::File;
 use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
 
-use anyhow::Result;
+use crate::error::DailyParseError;
 use byteorder::{LittleEndian, ReadBytesExt};
 use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone};
 use polars::datatypes::PlSmallStr;
 use polars::prelude::*;
-use thiserror::Error;
 
 const RECORD_SIZE: usize = 64;
 const PRICE_SCALE: f64 = 1000.0;
@@ -27,22 +26,6 @@ pub struct DailyKlineData {
     pub file_pre_close: f64,
 }
 
-#[derive(Error, Debug)]
-pub enum ParseError {
-    #[error("文件路径不能为空")]
-    EmptyPath,
-    #[error("文件必须是.dat或.DAT格式: {0}")]
-    InvalidExtension(String),
-    #[error("开始日期格式错误: {0}")]
-    InvalidStartDate(String),
-    #[error("结束日期格式错误: {0}")]
-    InvalidEndDate(String),
-    #[error("无效的时间戳")]
-    InvalidTimestamp,
-    #[error("IO错误: {0}")]
-    Io(#[from] std::io::Error),
-}
-
 /// Level 2: 日线 Reader，仅做原始读取与日期过滤
 pub struct DailyReader<R: Read> {
     reader: BufReader<R>,
@@ -57,7 +40,7 @@ impl DailyReader<File> {
         path: impl AsRef<Path>,
         start: Option<NaiveDate>,
         end: Option<NaiveDate>,
-    ) -> Result<Self, ParseError> {
+    ) -> Result<Self, DailyParseError> {
         let path = path.as_ref();
         validate_dat_path(path)?;
         let file = File::open(path)?;
@@ -78,7 +61,7 @@ impl<R: Read> DailyReader<R> {
 }
 
 impl<R: Read> Iterator for DailyReader<R> {
-    type Item = Result<DailyKlineData, ParseError>;
+    type Item = Result<DailyKlineData, DailyParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         loop {
@@ -86,7 +69,7 @@ impl<R: Read> Iterator for DailyReader<R> {
                 if err.kind() == std::io::ErrorKind::UnexpectedEof {
                     return None;
                 }
-                return Some(Err(ParseError::Io(err)));
+                return Some(Err(DailyParseError::Io(err)));
             }
 
             let mut cursor = Cursor::new(&self.buffer[..]);
@@ -104,10 +87,10 @@ pub fn parse_daily_to_structs(
     path: impl AsRef<Path>,
     start_date_str: &str,
     end_date_str: &str,
-) -> Result<Vec<DailyKlineData>> {
+) -> Result<Vec<DailyKlineData>, DailyParseError> {
     let path_ref = path.as_ref();
-    let start = parse_date(start_date_str).map_err(|e| ParseError::InvalidStartDate(e))?;
-    let end = parse_date(end_date_str).map_err(|e| ParseError::InvalidEndDate(e))?;
+    let start = parse_date(start_date_str).map_err(|e| DailyParseError::InvalidStartDate(e))?;
+    let end = parse_date(end_date_str).map_err(|e| DailyParseError::InvalidEndDate(e))?;
     let mut reader = DailyReader::from_path(path_ref, Some(start), Some(end))?;
     let mut out = Vec::with_capacity(estimate_rows(path_ref)?);
     for item in &mut reader {
@@ -117,10 +100,14 @@ pub fn parse_daily_to_structs(
 }
 
 /// Level 3 API: DataFrame（在 Lazy 端处理业务逻辑）
-pub fn parse_daily_to_dataframe(path: impl AsRef<Path>, start_date_str: &str, end_date_str: &str) -> Result<DataFrame> {
+pub fn parse_daily_to_dataframe(
+    path: impl AsRef<Path>,
+    start_date_str: &str,
+    end_date_str: &str,
+) -> Result<DataFrame, DailyParseError> {
     let path_ref = path.as_ref();
-    let start = parse_date(start_date_str).map_err(|e| ParseError::InvalidStartDate(e))?;
-    let end = parse_date(end_date_str).map_err(|e| ParseError::InvalidEndDate(e))?;
+    let start = parse_date(start_date_str).map_err(|e| DailyParseError::InvalidStartDate(e))?;
+    let end = parse_date(end_date_str).map_err(|e| DailyParseError::InvalidEndDate(e))?;
     let mut reader = DailyReader::from_path(path_ref, Some(start), Some(end))?;
 
     let estimated_rows = estimate_rows(path_ref)?;
@@ -206,9 +193,9 @@ pub fn parse_daily_to_dataframe(path: impl AsRef<Path>, start_date_str: &str, en
     Ok(df_final)
 }
 
-fn validate_dat_path(path: &Path) -> Result<(), ParseError> {
+fn validate_dat_path(path: &Path) -> Result<(), DailyParseError> {
     if path.as_os_str().is_empty() {
-        return Err(ParseError::EmptyPath);
+        return Err(DailyParseError::EmptyPath);
     }
     let ext = path
         .extension()
@@ -216,12 +203,12 @@ fn validate_dat_path(path: &Path) -> Result<(), ParseError> {
         .unwrap_or_default()
         .to_ascii_lowercase();
     if ext != "dat" {
-        return Err(ParseError::InvalidExtension(path.display().to_string()));
+        return Err(DailyParseError::InvalidExtension(path.display().to_string()));
     }
     Ok(())
 }
 
-fn estimate_rows(path: &Path) -> Result<usize> {
+fn estimate_rows(path: &Path) -> Result<usize, DailyParseError> {
     let file_len = std::fs::metadata(path)?.len();
     Ok((file_len as usize) / RECORD_SIZE + 1)
 }
@@ -235,11 +222,11 @@ fn parse_record(
     start: Option<NaiveDate>,
     end: Option<NaiveDate>,
     tz_offset: FixedOffset,
-) -> Result<Option<DailyKlineData>, ParseError> {
+) -> Result<Option<DailyKlineData>, DailyParseError> {
     cursor.set_position(8);
     let ts_seconds = cursor.read_u32::<LittleEndian>()?;
     let dt_utc = DateTime::from_timestamp(ts_seconds as i64, 0)
-        .ok_or(ParseError::InvalidTimestamp)?
+        .ok_or(DailyParseError::InvalidTimestamp)?
         .naive_utc();
 
     let current_date = tz_offset.from_utc_datetime(&dt_utc).date_naive();
@@ -285,7 +272,11 @@ fn parse_record(
 }
 
 /// 兼容旧命名
-pub fn parse_daily_kline(path: impl AsRef<Path>, start_date_str: &str, end_date_str: &str) -> Result<DataFrame> {
+pub fn parse_daily_kline(
+    path: impl AsRef<Path>,
+    start_date_str: &str,
+    end_date_str: &str,
+) -> Result<DataFrame, DailyParseError> {
     parse_daily_to_dataframe(path, start_date_str, end_date_str)
 }
 
@@ -295,7 +286,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn test_parse_daily_kline() -> Result<()> {
+    fn test_parse_daily_kline() -> Result<(), DailyParseError> {
         let daily_path = PathBuf::from("/mnt/data/trade/qmtdata/datadir/SZ/86400/000001.DAT");
 
         if !daily_path.exists() {

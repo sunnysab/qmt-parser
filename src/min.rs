@@ -2,11 +2,10 @@ use std::fs::File;
 use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
 
-use anyhow::Result;
+use crate::error::MinParseError;
 use byteorder::{LittleEndian, ReadBytesExt};
 use polars::datatypes::PlSmallStr;
 use polars::prelude::*;
-use thiserror::Error;
 
 const RECORD_SIZE: usize = 64;
 const PRICE_SCALE: f64 = 1000.0;
@@ -25,16 +24,6 @@ pub struct MinKlineData {
     pub pre_close: f64,
 }
 
-#[derive(Error, Debug)]
-pub enum ParseError {
-    #[error("文件路径不能为空")]
-    EmptyPath,
-    #[error("文件必须是.dat格式: {0}")]
-    InvalidExtension(String),
-    #[error("IO错误: {0}")]
-    Io(#[from] std::io::Error),
-}
-
 /// Level 2: Reader 迭代器
 pub struct MinReader<R: Read> {
     reader: BufReader<R>,
@@ -42,7 +31,7 @@ pub struct MinReader<R: Read> {
 }
 
 impl MinReader<File> {
-    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, ParseError> {
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, MinParseError> {
         let path = path.as_ref();
         validate_dat_path(path)?;
         let file = File::open(path)?;
@@ -60,23 +49,23 @@ impl<R: Read> MinReader<R> {
 }
 
 impl<R: Read> Iterator for MinReader<R> {
-    type Item = Result<MinKlineData, ParseError>;
+    type Item = Result<MinKlineData, MinParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Err(err) = self.reader.read_exact(&mut self.buffer) {
             if err.kind() == std::io::ErrorKind::UnexpectedEof {
                 return None;
             }
-            return Some(Err(ParseError::Io(err)));
+            return Some(Err(MinParseError::Io(err)));
         }
 
         let mut cursor = Cursor::new(&self.buffer[..]);
-        Some(parse_record(&mut cursor).map_err(ParseError::Io))
+        Some(parse_record(&mut cursor).map_err(MinParseError::Io))
     }
 }
 
 /// Level 3 API: Vec<Struct>
-pub fn parse_min_to_structs(path: impl AsRef<Path>) -> Result<Vec<MinKlineData>> {
+pub fn parse_min_to_structs(path: impl AsRef<Path>) -> Result<Vec<MinKlineData>, MinParseError> {
     let path_ref = path.as_ref();
     let mut reader = MinReader::from_path(path_ref)?;
     let estimated_rows = estimate_rows(path_ref)?;
@@ -88,7 +77,7 @@ pub fn parse_min_to_structs(path: impl AsRef<Path>) -> Result<Vec<MinKlineData>>
 }
 
 /// Level 3 API: DataFrame
-pub fn parse_min_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame> {
+pub fn parse_min_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame, MinParseError> {
     let path_ref = path.as_ref();
     let mut reader = MinReader::from_path(path_ref)?;
     let estimated_rows = estimate_rows(path_ref)?;
@@ -167,17 +156,17 @@ pub fn parse_min_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame> {
     Ok(df)
 }
 
-fn validate_dat_path(path: &Path) -> Result<(), ParseError> {
+fn validate_dat_path(path: &Path) -> Result<(), MinParseError> {
     if path.as_os_str().is_empty() {
-        return Err(ParseError::EmptyPath);
+        return Err(MinParseError::EmptyPath);
     }
     if path.extension().and_then(|s| s.to_str()) != Some("dat") {
-        return Err(ParseError::InvalidExtension(path.display().to_string()));
+        return Err(MinParseError::InvalidExtension(path.display().to_string()));
     }
     Ok(())
 }
 
-fn estimate_rows(path: &Path) -> Result<usize> {
+fn estimate_rows(path: &Path) -> Result<usize, MinParseError> {
     let file_len = std::fs::metadata(path)?.len();
     Ok((file_len as usize) / RECORD_SIZE + 1)
 }
@@ -215,7 +204,7 @@ fn parse_record(cursor: &mut Cursor<&[u8]>) -> std::io::Result<MinKlineData> {
 }
 
 /// 向后兼容旧命名
-pub fn parse_kline_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame> {
+pub fn parse_kline_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame, MinParseError> {
     parse_min_to_dataframe(path)
 }
 
@@ -225,7 +214,7 @@ mod tests {
     use std::path::PathBuf;
 
     #[test]
-    fn test_parse_kline_dataframe() -> Result<()> {
+    fn test_parse_kline_dataframe() -> Result<(), MinParseError> {
         let test_file = PathBuf::from("data/000000-1m.dat");
 
         let df = parse_min_to_dataframe(&test_file)?;

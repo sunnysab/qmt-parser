@@ -8,7 +8,6 @@ rust-version.workspace = true
 
 [dependencies]
 polars = { version = "0.52", features = ["lazy", "timezones"] }
-anyhow = "1"
 byteorder = "1.5"
 thiserror = "2"
 chrono = "0.4.42"

@@ -2,10 +2,9 @@ use std::fs::File;
 use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
 
-use anyhow::Result;
+use crate::error::TickParseError;
 use byteorder::{LittleEndian, ReadBytesExt};
 use polars::prelude::*;
-use thiserror::Error;
 
 const RECORD_SIZE: usize = 144;
 const PRICE_SCALE: f64 = 1000.0;
@@ -29,18 +28,6 @@ pub struct TickData {
     pub qmt_status_field_2_raw: u32,
 }
 
-#[derive(Error, Debug)]
-pub enum ParseError {
-    #[error("文件路径不能为空")]
-    EmptyPath,
-    #[error("文件必须是.dat格式: {0}")]
-    InvalidExtension(String),
-    #[error("无法从文件名解析日期")]
-    InvalidFileName,
-    #[error("IO错误: {0}")]
-    Io(#[from] std::io::Error),
-}
-
 /// Level 2: 迭代器 Reader
 pub struct TickReader<R: Read> {
     reader: BufReader<R>,
@@ -49,7 +36,7 @@ pub struct TickReader<R: Read> {
 }
 
 impl TickReader<File> {
-    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, ParseError> {
+    pub fn from_path(path: impl AsRef<Path>) -> Result<Self, TickParseError> {
         let path = path.as_ref();
         validate_dat_path(path)?;
         let date = extract_date_from_path(path)?;
@@ -69,23 +56,23 @@ impl<R: Read> TickReader<R> {
 }
 
 impl<R: Read> Iterator for TickReader<R> {
-    type Item = Result<TickData, ParseError>;
+    type Item = Result<TickData, TickParseError>;
 
     fn next(&mut self) -> Option<Self::Item> {
         if let Err(err) = self.reader.read_exact(&mut self.buffer) {
             if err.kind() == std::io::ErrorKind::UnexpectedEof {
                 return None;
             }
-            return Some(Err(ParseError::Io(err)));
+            return Some(Err(TickParseError::Io(err)));
         }
 
         let mut cursor = Cursor::new(&self.buffer[..]);
-        Some(parse_single_record(&mut cursor, &self.date).map_err(ParseError::Io))
+        Some(parse_single_record(&mut cursor, &self.date).map_err(TickParseError::Io))
     }
 }
 
 /// Level 3 API: 返回 Vec<TickData>
-pub fn parse_ticks_to_structs(path: impl AsRef<Path>) -> Result<Vec<TickData>> {
+pub fn parse_ticks_to_structs(path: impl AsRef<Path>) -> Result<Vec<TickData>, TickParseError> {
     let path_ref = path.as_ref();
     let estimated_rows = estimate_rows(path_ref)?;
     let mut reader = TickReader::from_path(path_ref)?;
@@ -97,7 +84,7 @@ pub fn parse_ticks_to_structs(path: impl AsRef<Path>) -> Result<Vec<TickData>> {
 }
 
 /// Level 3 API: 返回 DataFrame
-pub fn parse_ticks_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame> {
+pub fn parse_ticks_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame, TickParseError> {
     let path_ref = path.as_ref();
     let estimated_rows = estimate_rows(path_ref)?;
     let mut reader = TickReader::from_path(path_ref)?;
@@ -195,29 +182,29 @@ pub fn parse_ticks_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame> {
     Ok(df)
 }
 
-fn validate_dat_path(path: &Path) -> Result<(), ParseError> {
+fn validate_dat_path(path: &Path) -> Result<(), TickParseError> {
     if path.as_os_str().is_empty() {
-        return Err(ParseError::EmptyPath);
+        return Err(TickParseError::EmptyPath);
     }
     if path.extension().and_then(|s| s.to_str()) != Some("dat") {
-        return Err(ParseError::InvalidExtension(path.display().to_string()));
+        return Err(TickParseError::InvalidExtension(path.display().to_string()));
     }
     Ok(())
 }
 
-fn extract_date_from_path(path: &Path) -> Result<String, ParseError> {
+fn extract_date_from_path(path: &Path) -> Result<String, TickParseError> {
     let filename = path
         .file_name()
         .and_then(|s| s.to_str())
-        .ok_or(ParseError::InvalidFileName)?;
+        .ok_or(TickParseError::InvalidFileName)?;
     filename
         .split('.')
         .next()
         .map(|s| s.to_string())
-        .ok_or(ParseError::InvalidFileName)
+        .ok_or(TickParseError::InvalidFileName)
 }
 
-fn estimate_rows(path: &Path) -> Result<usize> {
+fn estimate_rows(path: &Path) -> Result<usize, TickParseError> {
     let file_len = std::fs::metadata(path)?.len();
     Ok((file_len as usize) / RECORD_SIZE + 1)
 }
@@ -294,7 +281,7 @@ mod test {
     const DAT_FILE: &str = "data/000001-20250529-tick.dat";
 
     #[test]
-    fn run_struct_demo() -> Result<()> {
+    fn run_struct_demo() -> Result<(), TickParseError> {
         let file_to_parse = PathBuf::from(DAT_FILE);
         let all_ticks = parse_ticks_to_structs(file_to_parse)?;
         println!("成功解析 {} 条 tick 数据。\n", all_ticks.len());
@@ -308,7 +295,7 @@ mod test {
     }
 
     #[test]
-    fn run_polars_demo() -> Result<()> {
+    fn run_polars_demo() -> Result<(), TickParseError> {
         let file_to_parse = PathBuf::from(DAT_FILE);
         let df = parse_ticks_to_dataframe(file_to_parse)?;
         println!("成功解析 DataFrame，尺寸: {:?}\n", df.shape());
