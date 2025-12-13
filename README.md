@@ -126,6 +126,29 @@ anyhow = "1.0"
     // df 包含 'preClose', 'suspendFlag' 等衍生列
     ```
 
+---
+
+### 4. 财务数据 (Finance) —— 逆向工程，暂不完全
+
+> 注意：财务模块基于 QMT 本地 .DAT 格式的逆向结果，解析逻辑仍在迭代；对 7006/7007 变长股东数据采用启发式解析，字段可能不完整。
+
+#### `FinanceReader::read_file`
+按文件名自动识别 TypeId（形如 `XXXXXX_7001.DAT`），返回 `Vec<FinanceRecord>`，内部枚举 `FinanceData` 区分各类型。
+
+*   **返回值**: `Result<Vec<FinanceRecord>, FinanceError>`
+*   **示例**:
+    ```rust
+    use qmt_parser::finance::{FinanceReader, FileType};
+    let records = FinanceReader::read_file("finance/002419_7001.DAT")?;
+    if let Some(first) = records.first() {
+        println!("type: {:?}, report_date: {}", FileType::BalanceSheet, first.report_date);
+    }
+    ```
+
+> 暂未提供 DataFrame 包装，若需要可在上层自行转换。
+
+---
+
 ##  注意事项
 
 1.  **价格精度**：
