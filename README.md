@@ -66,8 +66,9 @@ anyhow = "1.0"
 解析为 Polars DataFrame，适合量化分析。
 
 *   **返回值**: `Result<DataFrame>`
-*   **包含列**: `symbol`, `date`, `time`, `last_price`, `askPrice` (List), `bidPrice` (List), `volume`, `amount` 等。
+*   **包含列**: `market`, `symbol`, `date`, `time`, `last_price`, `askPrice` (List), `bidPrice` (List), `volume`, `amount` 等。
 *   **时间语义**: `time` 现已基于 SH/SZ 样本验证的 `raw_qmt_timestamp` 偏移规则解码为实际交易日内时间，并输出为 `Datetime[ms, Asia/Shanghai]`。该规则当前不外推到 BJ 等不同编码样本。
+*   **文件名语义**: 同时兼容仓库内样本命名 `000001-20250529-tick.dat` 和 QMT 原始目录命名 `.../SZ/0/000001/20250529.dat`。
 
 可通过 `tick_api_field_names()` 取得 QMT `get_full_tick` 文档中的正式字段名列表，通过 `tick_dataframe_column_names()` 取得本库当前 DataFrame 输出列名。
 
