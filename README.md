@@ -67,7 +67,7 @@ anyhow = "1.0"
 
 *   **返回值**: `Result<DataFrame>`
 *   **包含列**: `symbol`, `date`, `time`, `last_price`, `askPrice` (List), `bidPrice` (List), `volume`, `amount` 等。
-*   **时间语义**: `time` 现已基于样本验证的 `raw_qmt_timestamp` 偏移规则解码为实际交易日内时间，并输出为 `Datetime[ms, Asia/Shanghai]`。
+*   **时间语义**: `time` 现已基于 SH/SZ 样本验证的 `raw_qmt_timestamp` 偏移规则解码为实际交易日内时间，并输出为 `Datetime[ms, Asia/Shanghai]`。该规则当前不外推到 BJ 等不同编码样本。
 
 可通过 `tick_api_field_names()` 取得 QMT `get_full_tick` 文档中的正式字段名列表，通过 `tick_dataframe_column_names()` 取得本库当前 DataFrame 输出列名。
 

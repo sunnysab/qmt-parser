@@ -453,6 +453,9 @@ mod test {
             compose_tick_datetime_ms("000001-20250529-tick", 429_610_528),
             Some(1_748_481_310_528),
         );
+        // BJ market samples use a different raw timestamp encoding and should not be
+        // force-decoded by the SH/SZ offset rule.
+        assert_eq!(decode_qmt_timestamp_ms(2_070_911_528), None);
     }
 
     #[test]
