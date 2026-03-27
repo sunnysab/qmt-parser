@@ -4,11 +4,14 @@ use std::path::Path;
 
 use crate::error::TickParseError;
 use byteorder::{LittleEndian, ReadBytesExt};
+use chrono::{FixedOffset, NaiveDate, TimeZone};
+use polars::datatypes::PlSmallStr;
 use polars::prelude::*;
 
 const RECORD_SIZE: usize = 144;
 const PRICE_SCALE: f64 = 1000.0;
 const CALL_AUCTION_PHASE_CODE: u32 = 12;
+const QMT_TICK_TIME_OFFSET_MS: u32 = 396_300_000;
 
 pub const FULL_TICK_API_FIELD_NAMES: [&str; 17] = [
     "lastPrice",
@@ -148,6 +151,7 @@ pub fn parse_ticks_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame, Tic
 
     let mut dates = Vec::with_capacity(estimated_rows);
     let mut raw_qmt_timestamps = Vec::with_capacity(estimated_rows);
+    let mut time_values = Vec::with_capacity(estimated_rows);
     let mut last_prices: Vec<Option<f64>> = Vec::with_capacity(estimated_rows);
     let mut amounts: Vec<Option<f64>> = Vec::with_capacity(estimated_rows);
     let mut volumes: Vec<Option<u64>> = Vec::with_capacity(estimated_rows);
@@ -183,8 +187,10 @@ pub fn parse_ticks_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame, Tic
 
     for result in &mut reader {
         let tick = result?;
+        let decoded_time = compose_tick_datetime_ms(&tick.date, tick.raw_qmt_timestamp);
         dates.push(tick.date);
         raw_qmt_timestamps.push(tick.raw_qmt_timestamp);
+        time_values.push(decoded_time);
         market_phase_statuses.push(tick.market_phase_status);
         last_closes.push(tick.last_close);
         last_prices.push(tick.last_price);
@@ -210,7 +216,7 @@ pub fn parse_ticks_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame, Tic
     let df = df![
         "date" => dates,
         "raw_qmt_timestamp" => raw_qmt_timestamps,
-        "time" => empty_f64.clone(),
+        "time" => time_values,
         "last_price" => last_prices,
         "open" => empty_f64.clone(),
         "high" => empty_f64.clone(),
@@ -234,7 +240,41 @@ pub fn parse_ticks_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame, Tic
         "pe" => empty_f64,
     ]?;
 
+    let raw_tz = polars::prelude::TimeZone::opt_try_new(None::<PlSmallStr>)?;
+    let china_tz = polars::prelude::TimeZone::opt_try_new(Some("Asia/Shanghai"))?;
+
+    let df = df
+        .lazy()
+        .with_column(
+            col("time")
+                .cast(DataType::Datetime(TimeUnit::Milliseconds, raw_tz))
+                .dt()
+                .convert_time_zone(china_tz.unwrap())
+                .alias("time"),
+        )
+        .collect()?;
+
     Ok(df)
+}
+
+fn decode_qmt_timestamp_ms(raw: u32) -> Option<u32> {
+    raw.checked_sub(QMT_TICK_TIME_OFFSET_MS).filter(|ms| *ms < 86_400_000)
+}
+
+fn compose_tick_datetime_ms(date_str: &str, raw: u32) -> Option<i64> {
+    let trade_date = extract_trade_date(date_str)?;
+    let time_ms = decode_qmt_timestamp_ms(raw)? as i64;
+    let bj = FixedOffset::east_opt(8 * 3600)?;
+    let day_start = trade_date.and_hms_opt(0, 0, 0)?;
+    let local_dt = bj.from_local_datetime(&day_start).single()?;
+    Some(local_dt.timestamp_millis() + time_ms)
+}
+
+fn extract_trade_date(date_str: &str) -> Option<NaiveDate> {
+    date_str
+        .split('-')
+        .find(|part| part.len() == 8 && part.chars().all(|c| c.is_ascii_digit()))
+        .and_then(|part| NaiveDate::parse_from_str(part, "%Y%m%d").ok())
 }
 
 fn validate_dat_path(path: &Path) -> Result<(), TickParseError> {
@@ -380,6 +420,25 @@ mod test {
         let df = parse_ticks_to_dataframe(PathBuf::from(DAT_FILE))?;
         let names = df.get_column_names_str();
         assert_eq!(names.as_slice(), tick_dataframe_column_names());
+        Ok(())
+    }
+
+    #[test]
+    fn test_decode_qmt_timestamp() {
+        assert_eq!(decode_qmt_timestamp_ms(429_610_528), Some(33_310_528));
+        assert_eq!(decode_qmt_timestamp_ms(450_316_528), Some(54_016_528));
+        assert_eq!(
+            compose_tick_datetime_ms("000001-20250529-tick", 429_610_528),
+            Some(1_748_481_310_528),
+        );
+    }
+
+    #[test]
+    fn test_tick_dataframe_time_column_populated() -> Result<(), TickParseError> {
+        let df = parse_ticks_to_dataframe(PathBuf::from(DAT_FILE))?;
+        let time_col = df.column("time")?;
+        assert_eq!(time_col.null_count(), 0);
+        assert!(matches!(time_col.dtype(), DataType::Datetime(_, _)));
         Ok(())
     }
 }
