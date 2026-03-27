@@ -9,11 +9,17 @@ use chrono::{DateTime, FixedOffset, TimeZone};
 use memmap2::MmapOptions;
 use thiserror::Error;
 
-const STRIDE_REPORT: usize = 656;  // 7001, 7002, 7003
+const STRIDE_BALANCE: usize = 1264;  // 7001
+const STRIDE_INCOME: usize = 664;    // 7002
+const STRIDE_CASHFLOW: usize = 920;  // 7003
 const STRIDE_RATIOS: usize = 344;  // 7008
 const STRIDE_CAPITAL: usize = 56;  // 7004
 const STRIDE_HOLDER: usize = 64;   // 7005
 const STRIDE_TOP_HOLDER: usize = 416; // 7006, 7007
+const COLUMNS_BALANCE: usize = 156;
+const COLUMNS_INCOME: usize = 80;
+const COLUMNS_CASHFLOW: usize = 111;
+const COLUMNS_RATIOS: usize = 41;
 
 // 有效时间戳范围 (1990年 - 2050年, 毫秒)
 const MIN_VALID_TS: i64 = 631_152_000_000;
@@ -131,26 +137,44 @@ impl FinanceReader {
         let data = &mmap[..];
 
         match file_type {
-            FileType::BalanceSheet | FileType::Income | FileType::CashFlow => {
-                Self::parse_fixed(data, STRIDE_REPORT, |body| {
-                    let mut cols = Vec::with_capacity(80);
-                    for i in 0..80 {
+            FileType::BalanceSheet => {
+                Self::parse_fixed(data, STRIDE_BALANCE, 0, |body| {
+                    let mut cols = Vec::with_capacity(COLUMNS_BALANCE);
+                    for i in 0..COLUMNS_BALANCE {
+                        cols.push(Self::read_f64(body, i * 8).unwrap_or(f64::NAN));
+                    }
+                    FinanceData::Report { columns: cols }
+                })
+            }
+            FileType::Income => {
+                Self::parse_fixed(data, STRIDE_INCOME, 8, |body| {
+                    let mut cols = Vec::with_capacity(COLUMNS_INCOME);
+                    for i in 0..COLUMNS_INCOME {
+                        cols.push(Self::read_f64(body, i * 8).unwrap_or(f64::NAN));
+                    }
+                    FinanceData::Report { columns: cols }
+                })
+            }
+            FileType::CashFlow => {
+                Self::parse_fixed(data, STRIDE_CASHFLOW, 8, |body| {
+                    let mut cols = Vec::with_capacity(COLUMNS_CASHFLOW);
+                    for i in 0..COLUMNS_CASHFLOW {
                         cols.push(Self::read_f64(body, i * 8).unwrap_or(f64::NAN));
                     }
                     FinanceData::Report { columns: cols }
                 })
             }
             FileType::Ratios => {
-                Self::parse_fixed(data, STRIDE_RATIOS, |body| {
-                    let mut cols = Vec::with_capacity(41);
-                    for i in 0..41 {
+                Self::parse_fixed(data, STRIDE_RATIOS, 0, |body| {
+                    let mut cols = Vec::with_capacity(COLUMNS_RATIOS);
+                    for i in 0..COLUMNS_RATIOS {
                         cols.push(Self::read_f64(body, i * 8).unwrap_or(f64::NAN));
                     }
                     FinanceData::Ratios { ratios: cols }
                 })
             }
             FileType::Capital => {
-                Self::parse_fixed(data, STRIDE_CAPITAL, |body| {
+                Self::parse_fixed(data, STRIDE_CAPITAL, 0, |body| {
                     // Body Offset (Header=16): 0=Total, 8=Flow, 16=Restricted, 24=FreeFloat
                     FinanceData::Capital {
                         total_share: Self::read_f64(body, 0).unwrap_or(0.0),
@@ -184,16 +208,22 @@ impl FinanceReader {
 
     // --- 定长解析器 (7001-7004, 7008) ---
     /// 通用定长表解析器，接收回调解析正文部分
-    fn parse_fixed<F>(data: &[u8], stride: usize, parser: F) -> Result<Vec<FinanceRecord>, FinanceError>
+    fn parse_fixed<F>(
+        data: &[u8],
+        stride: usize,
+        header_offset: usize,
+        parser: F,
+    ) -> Result<Vec<FinanceRecord>, FinanceError>
     where F: Fn(&[u8]) -> FinanceData {
         let mut results = Vec::new();
         let mut cursor = 0;
         let len = data.len();
 
-        while cursor + 16 <= len {
+        while cursor + header_offset + 16 <= len {
             // 扫描 Header
-            let ts1 = LittleEndian::read_i64(&data[cursor..cursor+8]);
-            let ts2 = LittleEndian::read_i64(&data[cursor+8..cursor+16]);
+            let header_start = cursor + header_offset;
+            let ts1 = LittleEndian::read_i64(&data[header_start..header_start+8]);
+            let ts2 = LittleEndian::read_i64(&data[header_start+8..header_start+16]);
 
             // 7001-7004, 7008 顺序: Report, Announce
             if Self::is_valid_ts(ts1) {
@@ -207,7 +237,7 @@ impl FinanceReader {
                         report_date // Fallback
                     };
 
-                    let body = &data[cursor+16..cursor+stride];
+                    let body = &data[header_start+16..cursor+stride];
                     results.push(FinanceRecord {
                         report_date,
                         announce_date,
@@ -401,9 +431,10 @@ mod tests {
         let res = FinanceReader::read_file(&path).expect("Failed to parse 7001");
         assert!(!res.is_empty(), "7001 should not be empty");
 
-        // 验证类型是否正确
         if let FinanceData::Report { columns } = &res[0].data {
-            assert_eq!(columns.len(), 80);
+            assert_eq!(columns.len(), 156);
+            assert!(columns[0].is_nan());
+            assert!((columns[11] - 273_297_896.39).abs() < 1e-6);
         } else {
             panic!("7001 parsed as wrong type");
         }
@@ -421,6 +452,8 @@ mod tests {
 
         if let FinanceData::Report { columns } = &res[0].data {
             assert_eq!(columns.len(), 80);
+            assert!((columns[0] - 4_809_251_460.5).abs() < 1e-6);
+            assert!(columns[1].is_nan());
         } else {
             panic!("7002 parsed as wrong type");
         }
@@ -437,7 +470,9 @@ mod tests {
         assert!(!res.is_empty(), "7003 should not be empty");
 
         if let FinanceData::Report { columns } = &res[0].data {
-            assert_eq!(columns.len(), 80);
+            assert_eq!(columns.len(), 111);
+            assert!(columns[0].is_nan());
+            assert!((columns[23] - 5_506_707_615.58).abs() < 1e-6);
         } else {
             panic!("7003 parsed as wrong type");
         }
