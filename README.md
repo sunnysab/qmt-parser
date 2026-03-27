@@ -145,6 +145,8 @@ anyhow = "1.0"
     }
     ```
 
+可配合 `FinanceReader::column_names(file_type)` 取得当前已确认的字段名列表；对 `Report` / `Ratios` 数据还可以用 `FinanceData::named_values(file_type)` 拿到 `(字段名, 数值)` 列表。
+
 > 暂未提供 DataFrame 包装，若需要可在上层自行转换。
 
 ---
