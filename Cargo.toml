@@ -6,10 +6,22 @@ authors.workspace = true
 license.workspace = true
 rust-version.workspace = true
 
+[features]
+default = ["polars"]
+polars = ["dep:polars"]
+
 [dependencies]
-polars = { version = "0.52", features = ["lazy", "timezones"] }
+polars = { version = "0.52", features = ["lazy", "timezones"], optional = true }
 byteorder = "1.5"
 thiserror = "2"
 chrono = "0.4.42"
 rusty-leveldb = "1.0"
 memmap2 = "0.9.9"
+
+[dev-dependencies]
+criterion = "0.5"
+
+[[bench]]
+name = "tick_benchmark"
+harness = false
+required-features = ["polars"]
