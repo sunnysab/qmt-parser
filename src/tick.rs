@@ -33,7 +33,8 @@ pub const FULL_TICK_API_FIELD_NAMES: [&str; 17] = [
     "timetag",
 ];
 
-pub const TICK_DATAFRAME_COLUMN_NAMES: [&str; 24] = [
+pub const TICK_DATAFRAME_COLUMN_NAMES: [&str; 25] = [
+    "symbol",
     "date",
     "raw_qmt_timestamp",
     "time",
@@ -71,6 +72,7 @@ pub fn tick_dataframe_column_names() -> &'static [&'static str] {
 /// Level 1: 原始 Tick 结构体 (定长数组)
 #[derive(Debug, Clone)]
 pub struct TickData {
+    pub symbol: String,
     pub date: String,
     pub raw_qmt_timestamp: u32,
     pub market_phase_status: u32,
@@ -89,6 +91,7 @@ pub struct TickData {
 /// Level 2: 迭代器 Reader
 pub struct TickReader<R: Read> {
     reader: BufReader<R>,
+    symbol: String,
     date: String,
     buffer: [u8; RECORD_SIZE],
 }
@@ -97,16 +100,17 @@ impl TickReader<File> {
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, TickParseError> {
         let path = path.as_ref();
         validate_dat_path(path)?;
-        let date = extract_date_from_path(path)?;
+        let (symbol, date) = extract_tick_file_metadata(path)?;
         let file = File::open(path)?;
-        Ok(Self::new(file, date))
+        Ok(Self::new(file, symbol, date))
     }
 }
 
 impl<R: Read> TickReader<R> {
-    pub fn new(reader: R, date: impl Into<String>) -> Self {
+    pub fn new(reader: R, symbol: impl Into<String>, date: impl Into<String>) -> Self {
         TickReader {
             reader: BufReader::new(reader),
+            symbol: symbol.into(),
             date: date.into(),
             buffer: [0u8; RECORD_SIZE],
         }
@@ -125,7 +129,7 @@ impl<R: Read> Iterator for TickReader<R> {
         }
 
         let mut cursor = Cursor::new(&self.buffer[..]);
-        Some(parse_single_record(&mut cursor, &self.date).map_err(TickParseError::Io))
+        Some(parse_single_record(&mut cursor, &self.symbol, &self.date).map_err(TickParseError::Io))
     }
 }
 
@@ -150,6 +154,7 @@ pub fn parse_ticks_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame, Tic
     let price_levels = 5;
 
     let mut dates = Vec::with_capacity(estimated_rows);
+    let mut symbols = Vec::with_capacity(estimated_rows);
     let mut raw_qmt_timestamps = Vec::with_capacity(estimated_rows);
     let mut time_values = Vec::with_capacity(estimated_rows);
     let mut last_prices: Vec<Option<f64>> = Vec::with_capacity(estimated_rows);
@@ -188,6 +193,7 @@ pub fn parse_ticks_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame, Tic
     for result in &mut reader {
         let tick = result?;
         let decoded_time = compose_tick_datetime_ms(&tick.date, tick.raw_qmt_timestamp);
+        symbols.push(tick.symbol);
         dates.push(tick.date);
         raw_qmt_timestamps.push(tick.raw_qmt_timestamp);
         time_values.push(decoded_time);
@@ -214,6 +220,7 @@ pub fn parse_ticks_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame, Tic
     let empty_i64: Series = Series::new(PlSmallStr::from("empty_i64"), vec![None::<i64>; num_rows]);
 
     let df = df![
+        "symbol" => symbols,
         "date" => dates,
         "raw_qmt_timestamp" => raw_qmt_timestamps,
         "time" => time_values,
@@ -287,16 +294,22 @@ fn validate_dat_path(path: &Path) -> Result<(), TickParseError> {
     Ok(())
 }
 
-fn extract_date_from_path(path: &Path) -> Result<String, TickParseError> {
+fn extract_tick_file_metadata(path: &Path) -> Result<(String, String), TickParseError> {
     let filename = path
         .file_name()
         .and_then(|s| s.to_str())
         .ok_or(TickParseError::InvalidFileName)?;
-    filename
+    let stem = filename
         .split('.')
         .next()
-        .map(|s| s.to_string())
-        .ok_or(TickParseError::InvalidFileName)
+        .ok_or(TickParseError::InvalidFileName)?;
+    let mut parts = stem.split('-');
+    let symbol = parts.next().ok_or(TickParseError::InvalidFileName)?;
+    let date = parts.next().ok_or(TickParseError::InvalidFileName)?;
+    if symbol.is_empty() || date.len() != 8 || !date.chars().all(|c| c.is_ascii_digit()) {
+        return Err(TickParseError::InvalidFileName);
+    }
+    Ok((symbol.to_string(), date.to_string()))
 }
 
 fn estimate_rows(path: &Path) -> Result<usize, TickParseError> {
@@ -305,7 +318,7 @@ fn estimate_rows(path: &Path) -> Result<usize, TickParseError> {
 }
 
 /// 从单个144字节的记录中解析出核心数据，返回一个 TickData 实例
-fn parse_single_record(cursor: &mut Cursor<&[u8]>, date_str: &str) -> std::io::Result<TickData> {
+fn parse_single_record(cursor: &mut Cursor<&[u8]>, symbol: &str, date_str: &str) -> std::io::Result<TickData> {
     let raw_qmt_timestamp = cursor.read_u32::<LittleEndian>()?;
     let qmt_status_field_1_raw = cursor.read_u32::<LittleEndian>()?;
     cursor.set_position(8);
@@ -319,6 +332,7 @@ fn parse_single_record(cursor: &mut Cursor<&[u8]>, date_str: &str) -> std::io::R
     let last_close = cursor.read_u32::<LittleEndian>()? as f64 / PRICE_SCALE;
 
     let mut tick = TickData {
+        symbol: symbol.to_string(),
         date: date_str.to_string(),
         raw_qmt_timestamp,
         market_phase_status,
@@ -424,6 +438,14 @@ mod test {
     }
 
     #[test]
+    fn test_extract_tick_file_metadata() -> Result<(), TickParseError> {
+        let (symbol, date) = extract_tick_file_metadata(Path::new(DAT_FILE))?;
+        assert_eq!(symbol, "000001");
+        assert_eq!(date, "20250529");
+        Ok(())
+    }
+
+    #[test]
     fn test_decode_qmt_timestamp() {
         assert_eq!(decode_qmt_timestamp_ms(429_610_528), Some(33_310_528));
         assert_eq!(decode_qmt_timestamp_ms(450_316_528), Some(54_016_528));
@@ -436,6 +458,8 @@ mod test {
     #[test]
     fn test_tick_dataframe_time_column_populated() -> Result<(), TickParseError> {
         let df = parse_ticks_to_dataframe(PathBuf::from(DAT_FILE))?;
+        assert_eq!(df.column("symbol")?.str()?.get(0), Some("000001"));
+        assert_eq!(df.column("date")?.str()?.get(0), Some("20250529"));
         let time_col = df.column("time")?;
         assert_eq!(time_col.null_count(), 0);
         assert!(matches!(time_col.dtype(), DataType::Datetime(_, _)));
