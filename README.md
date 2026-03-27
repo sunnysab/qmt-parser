@@ -2,7 +2,7 @@
 
 **qmt-parser** 是一个高性能的 Rust 库，专门用于解析 MiniQMT (QMT) 交易终端生成的二进制历史数据文件（`.dat`）。
 
-该库旨在提供极致的解析速度和内存效率，同时提供灵活的 API，支持将数据解析为原生的 Rust 结构体（`Vec<Struct>`）或直接生成 **Polars DataFrame** 以进行高效的数据分析。
+该库旨在提供极致的解析速度和内存效率，同时提供灵活的 API，支持将数据解析为原生的 Rust 结构体（`Vec<Struct>`），并可在启用 `polars` feature 时直接生成 **Polars DataFrame** 以进行高效的数据分析。
 
 ## 概要
 
@@ -33,12 +33,14 @@
 
 ```toml
 [dependencies]
-qmt-parser = { path = "." } # 或指向 git 仓库
-polars = { version = "0.52", features = ["lazy", "temporal", "dtype-datetime", "timezones"] }
+qmt-parser = { path = ".", default-features = false } # 仅使用 structs / readers
+
+# 如需 DataFrame API，再启用 polars feature（默认已开启）
+# qmt-parser = { path = ".", features = ["polars"] }
 anyhow = "1.0"
 ```
 
-> **注意**：本库依赖 Polars **0.52+** 版本，使用了最新的数组排序和表达式 API。
+> **注意**：DataFrame API 依赖 Polars **0.52+**。只有在你的项目里实际调用 `parse_*_to_dataframe` 这类接口时，才需要额外添加 `polars` 依赖。
 
 ##  API 介绍
 
@@ -58,7 +60,7 @@ anyhow = "1.0"
     ```rust
     use qmt_parser::parse_ticks_to_structs;
     
-    let ticks = parse_ticks_to_structs("data/000001.dat")?;
+    let ticks = parse_ticks_to_structs("data/000001-20250529-tick.dat")?;
     println!("第一笔成交价: {:?}", ticks[0].last_price);
     ```
 
@@ -67,8 +69,9 @@ anyhow = "1.0"
 
 *   **返回值**: `Result<DataFrame>`
 *   **包含列**: `market`, `symbol`, `date`, `time`, `last_price`, `askPrice` (List), `bidPrice` (List), `volume`, `amount` 等。
-*   **时间语义**: `time` 现已基于 SH/SZ 样本验证的 `raw_qmt_timestamp` 偏移规则解码为实际交易日内时间，并输出为 `Datetime[ms, Asia/Shanghai]`。该规则当前不外推到 BJ 等不同编码样本。
+*   **时间语义**: `time` 现已按市场分别解码 `raw_qmt_timestamp` 并输出为 `Datetime[ms, Asia/Shanghai]`。SH/SZ 与 BJ 使用不同偏移规则，不能混用。
 *   **文件名语义**: 同时兼容仓库内样本命名 `000001-20250529-tick.dat` 和 QMT 原始目录命名 `.../SZ/0/000001/20250529.dat`。
+*   **扩展名语义**: 同时接受 `.dat` 和 `.DAT`。
 
 可通过 `tick_api_field_names()` 取得 QMT `get_full_tick` 文档中的正式字段名列表，通过 `tick_dataframe_column_names()` 取得本库当前 DataFrame 输出列名。
 
@@ -112,6 +115,13 @@ anyhow = "1.0"
 
 *   **返回值**: `Result<Vec<DailyKlineData>>`
 
+#### `parse_daily_file_to_structs` / `parse_daily_to_structs_in_range`
+
+如果上层已经有 `NaiveDate`，或者希望直接读取全量文件，可以使用更直接的 typed API：
+
+*   `parse_daily_file_to_structs(path)`：读取完整文件
+*   `parse_daily_to_structs_in_range(path, Option<NaiveDate>, Option<NaiveDate>)`：按 typed 日期过滤
+
 #### `parse_daily_to_dataframe`
 返回经过业务逻辑处理的 DataFrame。
 
@@ -134,6 +144,11 @@ anyhow = "1.0"
 
 本库也导出了 `daily_dataframe_column_names()`，便于上层复用当前输出 schema。
 
+同样提供：
+
+*   `parse_daily_file_to_dataframe(path)`：读取完整文件并返回 DataFrame
+*   `parse_daily_to_dataframe_in_range(path, Option<NaiveDate>, Option<NaiveDate>)`：typed 日期过滤
+
 ---
 
 ### 4. 财务数据 (Finance) —— 逆向工程，仍在补齐字段
@@ -149,13 +164,53 @@ anyhow = "1.0"
     use qmt_parser::finance::{FinanceReader, FileType};
     let records = FinanceReader::read_file("finance/002419_7001.DAT")?;
     if let Some(first) = records.first() {
-        println!("type: {:?}, report_date: {}", FileType::BalanceSheet, first.report_date);
+        println!("type: {:?}, report_date: {}", first.file_type, first.report_date);
     }
     ```
 
-可配合 `FinanceReader::column_names(file_type)` 取得当前已确认的字段名列表；对 `Report` / `Ratios` 数据还可以用 `FinanceData::named_values(file_type)` 拿到 `(字段名, 数值)` 列表。
+每条 `FinanceRecord` 都是自描述的：
+
+*   `record.file_type`：记录所属 `FileType`
+*   `record.column_names()`：对当前已结构化的 `Report` / `Ratios` 类型返回字段名列表
+*   `record.named_values()`：对 `Report` / `Ratios` 返回 `(字段名, 数值)` 列表
 
 > 暂未提供 DataFrame 包装，若需要可在上层自行转换。
+
+---
+
+### 5. 分红送配数据 (Dividend)
+
+`DividendDb` 用于读取 QMT LevelDB 中的除权除息数据：
+
+```rust
+use qmt_parser::dividend::DividendDb;
+
+let mut db = DividendDb::new("/path/to/DividData")?;
+let records = db.query("SH", "600000")?;
+```
+
+`new()` 和 `query()` 现在都返回 typed error，不再把坏 key/value 静默吞掉。
+
+---
+
+## Benchmark
+
+仓库内置了一个基于 Criterion 的 tick benchmark，使用样本文件 `data/000001-20250529-tick.dat` 比较两条端到端路径：
+
+- `parse_ticks_to_structs` + 原生 Rust `Vec<TickData>` 分析
+- `parse_ticks_to_dataframe` + Polars 分析
+
+运行命令：
+
+```bash
+cargo bench -p qmt-parser --features polars --bench tick_benchmark
+```
+
+范围说明：
+
+- 这是单证券、单交易日的 tick 样本 benchmark
+- 目标是做仓库内性能回归跟踪，不用于外推所有分析场景
+- benchmark 同时包含 `parse_only`、`analyze_only`、`end_to_end` 三组 case
 
 ---
 
