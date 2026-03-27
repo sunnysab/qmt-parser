@@ -5,7 +5,9 @@ use std::path::Path;
 use crate::error::DailyParseError;
 use byteorder::{LittleEndian, ReadBytesExt};
 use chrono::{DateTime, FixedOffset, NaiveDate, TimeZone};
+#[cfg(feature = "polars")]
 use polars::datatypes::PlSmallStr;
+#[cfg(feature = "polars")]
 use polars::prelude::*;
 
 const RECORD_SIZE: usize = 64;
@@ -106,10 +108,22 @@ pub fn parse_daily_to_structs(
     start_date_str: &str,
     end_date_str: &str,
 ) -> Result<Vec<DailyKlineData>, DailyParseError> {
-    let path_ref = path.as_ref();
     let start = parse_date(start_date_str).map_err(|e| DailyParseError::InvalidStartDate(e))?;
     let end = parse_date(end_date_str).map_err(|e| DailyParseError::InvalidEndDate(e))?;
-    let mut reader = DailyReader::from_path(path_ref, Some(start), Some(end))?;
+    parse_daily_to_structs_in_range(path, Some(start), Some(end))
+}
+
+pub fn parse_daily_file_to_structs(path: impl AsRef<Path>) -> Result<Vec<DailyKlineData>, DailyParseError> {
+    parse_daily_to_structs_in_range(path, None, None)
+}
+
+pub fn parse_daily_to_structs_in_range(
+    path: impl AsRef<Path>,
+    start: Option<NaiveDate>,
+    end: Option<NaiveDate>,
+) -> Result<Vec<DailyKlineData>, DailyParseError> {
+    let path_ref = path.as_ref();
+    let mut reader = DailyReader::from_path(path_ref, start, end)?;
     let mut out = Vec::with_capacity(estimate_rows(path_ref)?);
     for item in &mut reader {
         out.push(item?);
@@ -118,15 +132,30 @@ pub fn parse_daily_to_structs(
 }
 
 /// Level 3 API: DataFrame（在 Lazy 端处理业务逻辑）
+#[cfg(feature = "polars")]
 pub fn parse_daily_to_dataframe(
     path: impl AsRef<Path>,
     start_date_str: &str,
     end_date_str: &str,
 ) -> Result<DataFrame, DailyParseError> {
-    let path_ref = path.as_ref();
     let start = parse_date(start_date_str).map_err(|e| DailyParseError::InvalidStartDate(e))?;
     let end = parse_date(end_date_str).map_err(|e| DailyParseError::InvalidEndDate(e))?;
-    let mut reader = DailyReader::from_path(path_ref, Some(start), Some(end))?;
+    parse_daily_to_dataframe_in_range(path, Some(start), Some(end))
+}
+
+#[cfg(feature = "polars")]
+pub fn parse_daily_file_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame, DailyParseError> {
+    parse_daily_to_dataframe_in_range(path, None, None)
+}
+
+#[cfg(feature = "polars")]
+pub fn parse_daily_to_dataframe_in_range(
+    path: impl AsRef<Path>,
+    start: Option<NaiveDate>,
+    end: Option<NaiveDate>,
+) -> Result<DataFrame, DailyParseError> {
+    let path_ref = path.as_ref();
+    let mut reader = DailyReader::from_path(path_ref, start, end)?;
 
     let estimated_rows = estimate_rows(path_ref)?;
     let mut timestamps = Vec::with_capacity(estimated_rows);
@@ -290,6 +319,7 @@ fn parse_record(
 }
 
 /// 兼容旧命名
+#[cfg(feature = "polars")]
 pub fn parse_daily_kline(
     path: impl AsRef<Path>,
     start_date_str: &str,
@@ -301,9 +331,11 @@ pub fn parse_daily_kline(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use chrono::{DateTime, FixedOffset};
     use std::path::PathBuf;
 
     #[test]
+    #[cfg(feature = "polars")]
     fn test_parse_daily_kline() -> Result<(), DailyParseError> {
         let daily_path = PathBuf::from("/mnt/data/trade/qmtdata/datadir/SZ/86400/000001.DAT");
 
@@ -341,6 +373,34 @@ mod tests {
             }
         }
 
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_daily_full_file_and_typed_range_api() -> Result<(), DailyParseError> {
+        let daily_path = PathBuf::from("data/000001-1d.dat");
+
+        let full = parse_daily_file_to_structs(&daily_path)?;
+        assert!(!full.is_empty());
+
+        let bj = FixedOffset::east_opt(8 * 3600).expect("valid offset");
+        let start = DateTime::from_timestamp_millis(full.first().unwrap().timestamp_ms)
+            .unwrap()
+            .with_timezone(&bj)
+            .date_naive();
+        let end = DateTime::from_timestamp_millis(full.last().unwrap().timestamp_ms)
+            .unwrap()
+            .with_timezone(&bj)
+            .date_naive();
+
+        let typed = parse_daily_to_structs_in_range(&daily_path, Some(start), Some(end))?;
+        let legacy = parse_daily_to_structs(
+            &daily_path,
+            &start.format("%Y%m%d").to_string(),
+            &end.format("%Y%m%d").to_string(),
+        )?;
+
+        assert_eq!(typed.len(), legacy.len());
         Ok(())
     }
 }

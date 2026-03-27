@@ -4,14 +4,19 @@ use std::path::Path;
 
 use crate::error::TickParseError;
 use byteorder::{LittleEndian, ReadBytesExt};
+#[cfg(any(test, feature = "polars"))]
 use chrono::{FixedOffset, NaiveDate, TimeZone};
+#[cfg(feature = "polars")]
 use polars::datatypes::PlSmallStr;
+#[cfg(feature = "polars")]
 use polars::prelude::*;
 
 const RECORD_SIZE: usize = 144;
 const PRICE_SCALE: f64 = 1000.0;
 const CALL_AUCTION_PHASE_CODE: u32 = 12;
+#[cfg(any(test, feature = "polars"))]
 const QMT_TICK_TIME_OFFSET_MS: u32 = 396_300_000;
+#[cfg(any(test, feature = "polars"))]
 const BJ_TICK_TIME_OFFSET_MS: u32 = 50_400_000;
 
 pub const FULL_TICK_API_FIELD_NAMES: [&str; 17] = [
@@ -159,6 +164,7 @@ pub fn parse_ticks_to_structs(path: impl AsRef<Path>) -> Result<Vec<TickData>, T
 }
 
 /// Level 3 API: 返回 DataFrame
+#[cfg(feature = "polars")]
 pub fn parse_ticks_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame, TickParseError> {
     let path_ref = path.as_ref();
     let estimated_rows = estimate_rows(path_ref)?;
@@ -281,10 +287,12 @@ pub fn parse_ticks_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame, Tic
     Ok(df)
 }
 
+#[cfg(any(test, feature = "polars"))]
 fn decode_qmt_timestamp_ms(raw: u32) -> Option<u32> {
     raw.checked_sub(QMT_TICK_TIME_OFFSET_MS).filter(|ms| *ms < 86_400_000)
 }
 
+#[cfg(any(test, feature = "polars"))]
 fn decode_qmt_timestamp_ms_for_market(market: Option<&str>, raw: u32) -> Option<u32> {
     match market {
         Some("BJ") => Some((raw % 86_400_000 + 86_400_000 - BJ_TICK_TIME_OFFSET_MS) % 86_400_000),
@@ -292,6 +300,7 @@ fn decode_qmt_timestamp_ms_for_market(market: Option<&str>, raw: u32) -> Option<
     }
 }
 
+#[cfg(any(test, feature = "polars"))]
 fn compose_tick_datetime_ms(market: Option<&str>, date_str: &str, raw: u32) -> Option<i64> {
     let trade_date = extract_trade_date(date_str)?;
     let time_ms = decode_qmt_timestamp_ms_for_market(market, raw)? as i64;
@@ -301,6 +310,7 @@ fn compose_tick_datetime_ms(market: Option<&str>, date_str: &str, raw: u32) -> O
     Some(local_dt.timestamp_millis() + time_ms)
 }
 
+#[cfg(any(test, feature = "polars"))]
 fn extract_trade_date(date_str: &str) -> Option<NaiveDate> {
     if date_str.len() == 8 && date_str.chars().all(|c| c.is_ascii_digit()) {
         return NaiveDate::parse_from_str(date_str, "%Y%m%d").ok();
@@ -316,7 +326,12 @@ fn validate_dat_path(path: &Path) -> Result<(), TickParseError> {
     if path.as_os_str().is_empty() {
         return Err(TickParseError::EmptyPath);
     }
-    if path.extension().and_then(|s| s.to_str()) != Some("dat") {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if ext != "dat" {
         return Err(TickParseError::InvalidExtension(path.display().to_string()));
     }
     Ok(())
@@ -438,6 +453,7 @@ fn parse_single_record(
 #[cfg(test)]
 mod test {
     use super::*;
+    use std::fs;
     use std::path::PathBuf;
 
     const DAT_FILE: &str = "data/000001-20250529-tick.dat";
@@ -457,6 +473,7 @@ mod test {
     }
 
     #[test]
+    #[cfg(feature = "polars")]
     fn run_polars_demo() -> Result<(), TickParseError> {
         let file_to_parse = PathBuf::from(DAT_FILE);
         let df = parse_ticks_to_dataframe(file_to_parse)?;
@@ -479,6 +496,7 @@ mod test {
     }
 
     #[test]
+    #[cfg(feature = "polars")]
     fn test_tick_schema_names() -> Result<(), TickParseError> {
         assert_eq!(tick_api_field_names()[0], "lastPrice");
         assert_eq!(tick_api_field_names()[4], "openInt");
@@ -511,6 +529,7 @@ mod test {
     }
 
     #[test]
+    #[cfg(feature = "polars")]
     fn test_tick_dataframe_time_column_populated() -> Result<(), TickParseError> {
         let df = parse_ticks_to_dataframe(PathBuf::from(DAT_FILE))?;
         assert_eq!(df.column("market")?.str()?.get(0), None);
@@ -529,6 +548,40 @@ mod test {
         assert_eq!(market.as_deref(), Some("BJ"));
         assert_eq!(symbol, "430017");
         assert_eq!(date, "20250617");
+        Ok(())
+    }
+
+    #[test]
+    fn test_tick_reader_accepts_uppercase_dat_extension() -> Result<(), TickParseError> {
+        let src = PathBuf::from(DAT_FILE);
+        let tmp = std::env::temp_dir().join("000001-20250529-tick.DAT");
+        fs::copy(&src, &tmp)?;
+
+        let reader = TickReader::from_path(&tmp)?;
+        let first = reader.take(1).collect::<Result<Vec<_>, _>>()?;
+        assert_eq!(first.len(), 1);
+
+        fs::remove_file(tmp)?;
+        Ok(())
+    }
+
+    #[test]
+    fn test_parse_real_bj_tick_sample_when_available() -> Result<(), TickParseError> {
+        let path = PathBuf::from("/mnt/data/trade/qmtdata/datadir/BJ/0/430017/20250617.dat");
+        if !path.exists() {
+            return Ok(());
+        }
+
+        let ticks = parse_ticks_to_structs(&path)?;
+        assert!(!ticks.is_empty());
+        let first = &ticks[0];
+        assert_eq!(first.market.as_deref(), Some("BJ"));
+        assert_eq!(first.symbol, "430017");
+        assert_eq!(first.date, "20250617");
+        assert_eq!(
+            decode_qmt_timestamp_ms_for_market(first.market.as_deref(), first.raw_qmt_timestamp),
+            Some(33_311_528),
+        );
         Ok(())
     }
 }

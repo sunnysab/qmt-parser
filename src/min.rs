@@ -4,7 +4,9 @@ use std::path::Path;
 
 use crate::error::MinParseError;
 use byteorder::{LittleEndian, ReadBytesExt};
+#[cfg(feature = "polars")]
 use polars::datatypes::PlSmallStr;
+#[cfg(feature = "polars")]
 use polars::prelude::*;
 
 const RECORD_SIZE: usize = 64;
@@ -95,6 +97,7 @@ pub fn parse_min_to_structs(path: impl AsRef<Path>) -> Result<Vec<MinKlineData>,
 }
 
 /// Level 3 API: DataFrame
+#[cfg(feature = "polars")]
 pub fn parse_min_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame, MinParseError> {
     let path_ref = path.as_ref();
     let mut reader = MinReader::from_path(path_ref)?;
@@ -178,7 +181,12 @@ fn validate_dat_path(path: &Path) -> Result<(), MinParseError> {
     if path.as_os_str().is_empty() {
         return Err(MinParseError::EmptyPath);
     }
-    if path.extension().and_then(|s| s.to_str()) != Some("dat") {
+    let ext = path
+        .extension()
+        .and_then(|s| s.to_str())
+        .unwrap_or_default()
+        .to_ascii_lowercase();
+    if ext != "dat" {
         return Err(MinParseError::InvalidExtension(path.display().to_string()));
     }
     Ok(())
@@ -222,11 +230,12 @@ fn parse_record(cursor: &mut Cursor<&[u8]>) -> std::io::Result<MinKlineData> {
 }
 
 /// 向后兼容旧命名
+#[cfg(feature = "polars")]
 pub fn parse_kline_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame, MinParseError> {
     parse_min_to_dataframe(path)
 }
 
-#[cfg(test)]
+#[cfg(all(test, feature = "polars"))]
 mod tests {
     use super::*;
     use std::path::PathBuf;
