@@ -79,7 +79,12 @@ pub fn assert_summary_close(
         tolerance,
         "last_price_mean",
     );
-    assert_option_f64_close(left.spread_mean, right.spread_mean, tolerance, "spread_mean");
+    assert_option_f64_close(
+        left.spread_mean,
+        right.spread_mean,
+        tolerance,
+        "spread_mean",
+    );
     assert_option_f64_close(left.spread_max, right.spread_max, tolerance, "spread_max");
     assert_option_f64_close(
         left.mid_price_mean,
@@ -110,7 +115,9 @@ fn analyze_basic_scan_vec(rows: &[TickData]) -> TickAnalysisSummary {
     let mut last_price_max: Option<f64> = None;
 
     for row in rows {
-        let (Some(last_price), Some(amount), Some(volume)) = (row.last_price, row.amount, row.volume) else {
+        let (Some(last_price), Some(amount), Some(volume)) =
+            (row.last_price, row.amount, row.volume)
+        else {
             continue;
         };
 
@@ -146,7 +153,9 @@ fn analyze_mixed_orderbook_vec(rows: &[TickData]) -> TickAnalysisSummary {
     let mut bid_vol_sum = 0.0_f64;
 
     for row in rows {
-        let (Some(_last_price), Some(_amount), Some(_volume)) = (row.last_price, row.amount, row.volume) else {
+        let (Some(_last_price), Some(_amount), Some(_volume)) =
+            (row.last_price, row.amount, row.volume)
+        else {
             continue;
         };
         let (Some(best_ask), Some(best_bid)) = (row.ask_prices[0], row.bid_prices[0]) else {
@@ -222,18 +231,16 @@ fn analyze_mixed_orderbook_polars(df: &DataFrame) -> Result<TickAnalysisSummary,
         .lazy()
         .filter(valid_trade_filter())
         .with_columns([
-            col("askPrice")
-                .list()
-                .get(lit(0), true)
-                .alias("best_ask"),
-            col("bidPrice")
-                .list()
-                .get(lit(0), true)
-                .alias("best_bid"),
+            col("askPrice").list().get(lit(0), true).alias("best_ask"),
+            col("bidPrice").list().get(lit(0), true).alias("best_bid"),
             col("askVol").list().sum().alias("ask_vol_sum_5"),
             col("bidVol").list().sum().alias("bid_vol_sum_5"),
         ])
-        .filter(col("best_ask").is_not_null().and(col("best_bid").is_not_null()))
+        .filter(
+            col("best_ask")
+                .is_not_null()
+                .and(col("best_bid").is_not_null()),
+        )
         .with_columns([
             (col("best_ask") - col("best_bid")).alias("spread"),
             ((col("best_ask") + col("best_bid")) / lit(2.0)).alias("mid_price"),

@@ -36,9 +36,7 @@ fn bench_tick(c: &mut Criterion) {
     group.bench_with_input(
         BenchmarkId::new("parse_only", "vec"),
         &sample_path,
-        |b, path| {
-            b.iter(|| black_box(parse_ticks_to_structs(black_box(path)).expect("parse vec")))
-        },
+        |b, path| b.iter(|| black_box(parse_ticks_to_structs(black_box(path)).expect("parse vec"))),
     );
     group.bench_with_input(
         BenchmarkId::new("parse_only", "polars"),
@@ -49,7 +47,12 @@ fn bench_tick(c: &mut Criterion) {
     );
 
     group.bench_function("analyze_only/basic_scan/vec", |b| {
-        b.iter(|| black_box(analyze_ticks_vec(black_box(&preloaded_rows), Workload::BasicScan)))
+        b.iter(|| {
+            black_box(analyze_ticks_vec(
+                black_box(&preloaded_rows),
+                Workload::BasicScan,
+            ))
+        })
     });
     group.bench_function("analyze_only/basic_scan/polars", |b| {
         b.iter(|| {

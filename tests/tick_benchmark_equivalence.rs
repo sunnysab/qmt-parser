@@ -20,7 +20,11 @@ fn assert_option_f64_eq(left: Option<f64>, right: Option<f64>) {
 #[test]
 fn sample_tick_inputs_are_non_empty() {
     let path = sample_tick_path();
-    assert!(path.exists(), "missing sample tick file: {}", path.display());
+    assert!(
+        path.exists(),
+        "missing sample tick file: {}",
+        path.display()
+    );
 
     let rows = load_tick_structs().expect("tick structs should parse");
     assert!(!rows.is_empty(), "tick struct sample should not be empty");
@@ -78,7 +82,15 @@ fn vec_basic_scan_matches_expected_summary() {
             [Some(4), Some(5), None, None, None],
             [Some(6), Some(7), None, None, None],
         ),
-        make_tick(None, Some(400.0), Some(30), None, None, [None; 5], [None; 5]),
+        make_tick(
+            None,
+            Some(400.0),
+            Some(30),
+            None,
+            None,
+            [None; 5],
+            [None; 5],
+        ),
     ];
 
     let summary = analyze_ticks_vec(&rows, Workload::BasicScan);
@@ -112,7 +124,15 @@ fn vec_mixed_orderbook_matches_expected_summary() {
             [Some(4), Some(5), None, None, None],
             [Some(6), Some(7), None, None, None],
         ),
-        make_tick(Some(13.0), Some(500.0), Some(50), None, Some(12.9), [None; 5], [None; 5]),
+        make_tick(
+            Some(13.0),
+            Some(500.0),
+            Some(50),
+            None,
+            Some(12.9),
+            [None; 5],
+            [None; 5],
+        ),
     ];
 
     let summary = analyze_ticks_vec(&rows, Workload::MixedOrderBook);
