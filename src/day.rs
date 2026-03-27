@@ -12,6 +12,24 @@ const RECORD_SIZE: usize = 64;
 const PRICE_SCALE: f64 = 1000.0;
 const AMOUNT_SCALE: f64 = 100.0;
 
+pub const DAILY_DATAFRAME_COLUMN_NAMES: [&str; 11] = [
+    "time",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "amount",
+    "settlementPrice",
+    "openInterest",
+    "preClose",
+    "suspendFlag",
+];
+
+pub fn daily_dataframe_column_names() -> &'static [&'static str] {
+    &DAILY_DATAFRAME_COLUMN_NAMES
+}
+
 /// Level 1: 日线原始结构
 #[derive(Debug, Clone)]
 pub struct DailyKlineData {
@@ -303,6 +321,7 @@ mod tests {
         println!("{}", df);
 
         if df.height() > 0 {
+            assert_eq!(df.get_column_names_str().as_slice(), daily_dataframe_column_names());
             let cols = df.get_column_names();
             assert!(cols.iter().any(|c| c.as_str() == "suspendFlag"));
             assert!(cols.iter().any(|c| c.as_str() == "preClose"));

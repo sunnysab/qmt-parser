@@ -68,6 +68,8 @@ anyhow = "1.0"
 *   **返回值**: `Result<DataFrame>`
 *   **包含列**: `time`, `last_price`, `askPrice` (List), `bidPrice` (List), `volume`, `amount` 等。
 
+可通过 `tick_api_field_names()` 取得 QMT `get_full_tick` 文档中的正式字段名列表，通过 `tick_dataframe_column_names()` 取得本库当前 DataFrame 输出列名。
+
 ---
 
 ### 2. 1分钟 K线 (MinKline)
@@ -88,6 +90,8 @@ anyhow = "1.0"
     let df = parse_min_to_dataframe("data/000001-1m.dat")?;
     println!("{}", df);
     ```
+
+本库也导出了 `min_dataframe_column_names()`，便于上层复用当前输出 schema。
 
 ---
 
@@ -125,6 +129,8 @@ anyhow = "1.0"
     )?;
     // df 包含 'preClose', 'suspendFlag' 等衍生列
     ```
+
+本库也导出了 `daily_dataframe_column_names()`，便于上层复用当前输出 schema。
 
 ---
 

@@ -10,6 +10,61 @@ const RECORD_SIZE: usize = 144;
 const PRICE_SCALE: f64 = 1000.0;
 const CALL_AUCTION_PHASE_CODE: u32 = 12;
 
+pub const FULL_TICK_API_FIELD_NAMES: [&str; 17] = [
+    "lastPrice",
+    "amount",
+    "volume",
+    "pvolume",
+    "openInt",
+    "stockStatus",
+    "lastSettlementPrice",
+    "open",
+    "high",
+    "low",
+    "settlementPrice",
+    "lastClose",
+    "askPrice",
+    "bidPrice",
+    "askVol",
+    "bidVol",
+    "timetag",
+];
+
+pub const TICK_DATAFRAME_COLUMN_NAMES: [&str; 24] = [
+    "date",
+    "raw_qmt_timestamp",
+    "time",
+    "last_price",
+    "open",
+    "high",
+    "low",
+    "last_close",
+    "amount",
+    "volume",
+    "pvolume",
+    "tickvol",
+    "market_phase_status",
+    "stockStatus",
+    "qmt_status_field_1_raw",
+    "qmt_status_field_2_raw",
+    "lastSettlementPrice",
+    "askPrice",
+    "bidPrice",
+    "askVol",
+    "bidVol",
+    "settlementPrice",
+    "transactionNum",
+    "pe",
+];
+
+pub fn tick_api_field_names() -> &'static [&'static str] {
+    &FULL_TICK_API_FIELD_NAMES
+}
+
+pub fn tick_dataframe_column_names() -> &'static [&'static str] {
+    &TICK_DATAFRAME_COLUMN_NAMES
+}
+
 /// Level 1: 原始 Tick 结构体 (定长数组)
 #[derive(Debug, Clone)]
 pub struct TickData {
@@ -313,6 +368,18 @@ mod test {
             println!("\n--- Polars 分析示例 ---");
             println!("所有Tick的平均价格: {:.4}", mean_price);
         }
+        Ok(())
+    }
+
+    #[test]
+    fn test_tick_schema_names() -> Result<(), TickParseError> {
+        assert_eq!(tick_api_field_names()[0], "lastPrice");
+        assert_eq!(tick_api_field_names()[4], "openInt");
+        assert_eq!(tick_api_field_names()[16], "timetag");
+
+        let df = parse_ticks_to_dataframe(PathBuf::from(DAT_FILE))?;
+        let names = df.get_column_names_str();
+        assert_eq!(names.as_slice(), tick_dataframe_column_names());
         Ok(())
     }
 }

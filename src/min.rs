@@ -10,6 +10,24 @@ use polars::prelude::*;
 const RECORD_SIZE: usize = 64;
 const PRICE_SCALE: f64 = 1000.0;
 
+pub const MIN_DATAFRAME_COLUMN_NAMES: [&str; 11] = [
+    "time",
+    "open",
+    "high",
+    "low",
+    "close",
+    "volume",
+    "amount",
+    "settlementPrice",
+    "openInterest",
+    "preClose",
+    "suspendFlag",
+];
+
+pub fn min_dataframe_column_names() -> &'static [&'static str] {
+    &MIN_DATAFRAME_COLUMN_NAMES
+}
+
 /// Level 1: 1分钟线结构体
 #[derive(Debug, Clone)]
 pub struct MinKlineData {
@@ -221,6 +239,7 @@ mod tests {
 
         println!("--- Tail ---");
         println!("{}", df.tail(Some(5)));
+        assert_eq!(df.get_column_names_str().as_slice(), min_dataframe_column_names());
         Ok(())
     }
 }
