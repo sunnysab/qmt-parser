@@ -13,6 +13,7 @@ const STRIDE_REPORT: usize = 656;  // 7001, 7002, 7003
 const STRIDE_RATIOS: usize = 344;  // 7008
 const STRIDE_CAPITAL: usize = 56;  // 7004
 const STRIDE_HOLDER: usize = 64;   // 7005
+const STRIDE_TOP_HOLDER: usize = 416; // 7006, 7007
 
 // 有效时间戳范围 (1990年 - 2050年, 毫秒)
 const MIN_VALID_TS: i64 = 631_152_000_000;
@@ -54,13 +55,16 @@ pub enum FinanceData {
         total_share: f64,
         flow_share: f64,
         restricted: f64,
-        reserved: f64,
-        reason: String,
+        free_float_share: f64,
     },
     /// 7005: 股东人数
     HolderCount {
         total_holders: i64,
-        avg_share: f64,
+        a_holders: i64,
+        b_holders: i64,
+        h_holders: i64,
+        float_holders: i64,
+        other_holders: i64,
     },
     /// 7006, 7007: 十大(流通)股东
     TopHolder {
@@ -74,11 +78,12 @@ pub enum FinanceData {
 #[derive(Debug, Clone)]
 pub struct Shareholder {
     pub name: String,
+    pub holder_type: String,
     pub hold_amount: f64,
+    pub change_reason: String,
     pub hold_ratio: f64, // 比例 (如 0.05 代表 5%)
-    pub change: String,  // 变动情况 (e.g. "未变")
-    pub nature: String,  // 股东性质 (e.g. "自然人")
-    pub share_type: String, // 股份类型 (e.g. "流通A股")
+    pub share_type: String, // 股份性质 (e.g. "流通A股")
+    pub rank: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
@@ -146,13 +151,12 @@ impl FinanceReader {
             }
             FileType::Capital => {
                 Self::parse_fixed(data, STRIDE_CAPITAL, |body| {
-                    // Body Offset (Header=16): 0=Total, 8=Flow, 16=Restricted, 24=Reserved, 32=String
+                    // Body Offset (Header=16): 0=Total, 8=Flow, 16=Restricted, 24=FreeFloat
                     FinanceData::Capital {
                         total_share: Self::read_f64(body, 0).unwrap_or(0.0),
                         flow_share: Self::read_f64(body, 8).unwrap_or(0.0),
                         restricted: Self::read_f64(body, 16).unwrap_or(0.0),
-                        reserved: Self::read_f64(body, 24).unwrap_or(0.0),
-                        reason: Self::read_string(body, 32, 24), // 剩余空间读取字符串
+                        free_float_share: Self::read_f64(body, 24).unwrap_or(0.0),
                     }
                 })
             }
@@ -165,7 +169,7 @@ impl FinanceReader {
                 Self::parse_7005_fixed(data)
             }
             FileType::TopFlowHolder | FileType::TopHolder => {
-                Self::parse_variable_blocks(data)
+                Self::parse_top_holders(data)
             }
         }
     }
@@ -239,12 +243,23 @@ impl FinanceReader {
 
                     let body = &data[cursor+16..cursor+stride];
                     let total_holders = Self::read_f64(body, 0).unwrap_or(0.0) as i64;
-                    let avg_share = Self::read_f64(body, 8).unwrap_or(0.0);
+                    let a_holders = Self::read_f64(body, 8).unwrap_or(0.0) as i64;
+                    let b_holders = Self::read_f64(body, 16).unwrap_or(0.0) as i64;
+                    let h_holders = Self::read_f64(body, 24).unwrap_or(0.0) as i64;
+                    let float_holders = Self::read_f64(body, 32).unwrap_or(0.0) as i64;
+                    let other_holders = Self::read_f64(body, 40).unwrap_or(0.0) as i64;
 
                     results.push(FinanceRecord {
                         report_date,
                         announce_date,
-                        data: FinanceData::HolderCount { total_holders, avg_share }
+                        data: FinanceData::HolderCount {
+                            total_holders,
+                            a_holders,
+                            b_holders,
+                            h_holders,
+                            float_holders,
+                            other_holders,
+                        }
                     });
                     cursor += stride;
                     continue;
@@ -255,132 +270,64 @@ impl FinanceReader {
         Ok(results)
     }
 
-    // --- 变长解析器 (7006, 7007) ---
-    // 逻辑：扫描 Block Header [Count(4) + Report(8) + Announce(8)]
-    // 然后根据 Next Header 的位置动态计算 Stride，解析内部的 Count 条记录
-    /// 启发式解析 7006/7007 变长股东数据
-    fn parse_variable_blocks(data: &[u8]) -> Result<Vec<FinanceRecord>, FinanceError> {
+    /// 解析 7006/7007 十大(流通)股东定长记录，并按同一报告期聚合。
+    fn parse_top_holders(data: &[u8]) -> Result<Vec<FinanceRecord>, FinanceError> {
         let mut results = Vec::new();
-        let mut headers = Vec::new(); // (offset, count, ts_rep, ts_ann)
+        let mut current_report_ts = 0i64;
+        let mut current_announce_ts = 0i64;
+        let mut current_holders = Vec::new();
 
-        // 1. 第一遍扫描：找出所有的 Block Header
-        let mut cursor = 0;
-        while cursor + 20 <= data.len() {
-            // 特征：[Count(4)] [Report(8)] [Announce(8)]
-            // 有时候 Count 在日期前面。根据 hexdump：
-            // 7006/7007: ... [Count: 4B] [Report: 8B] [Announce: 8B] ...
-            // 或者 [Report: 8B] [Announce: 8B] ... [Count] ???
-            // 之前的 Hexdump 显示: 1d00 Dates. 1cfc Count. -> Count 在 Dates 前面 4 字节。
-
-            let ts1 = LittleEndian::read_i64(&data[cursor+4..cursor+12]);
-            let ts2 = LittleEndian::read_i64(&data[cursor+12..cursor+20]);
-
-            if Self::is_valid_ts(ts1) {
-                let count = LittleEndian::read_u32(&data[cursor..cursor+4]) as usize;
-                // Count 合理性检查 (1 ~ 500)
-                if count > 0 && count < 1000 {
-                    headers.push((cursor, count, ts1, ts2));
-                    cursor += 20; // Skip header
-                    continue;
-                }
+        for chunk in data.chunks_exact(STRIDE_TOP_HOLDER) {
+            let announce_ts = LittleEndian::read_i64(&chunk[0..8]);
+            let report_ts = LittleEndian::read_i64(&chunk[8..16]);
+            if !Self::is_valid_ts(announce_ts) || !Self::is_valid_ts(report_ts) {
+                continue;
             }
-            cursor += 4; // 步长 4 扫描
+
+            let holder = Self::parse_top_holder_record(chunk);
+            if current_holders.is_empty() {
+                current_report_ts = report_ts;
+                current_announce_ts = announce_ts;
+            }
+
+            if report_ts != current_report_ts || announce_ts != current_announce_ts {
+                results.push(FinanceRecord {
+                    report_date: Self::ts_to_bj(current_report_ts),
+                    announce_date: Self::ts_to_bj(current_announce_ts),
+                    data: FinanceData::TopHolder {
+                        holders: std::mem::take(&mut current_holders),
+                    },
+                });
+                current_report_ts = report_ts;
+                current_announce_ts = announce_ts;
+            }
+
+            current_holders.push(holder);
         }
 
-        // 2. 第二遍：根据 Header 间距切分数据
-        for i in 0..headers.len() {
-            let (curr_off, count, ts_rep, ts_ann) = headers[i];
-
-            // 计算数据区结束位置
-            let data_start = curr_off + 20;
-            let data_end = if i < headers.len() - 1 {
-                headers[i+1].0 // 下一个 Header 的开始
-            } else {
-                data.len() // 文件末尾
-            };
-
-            if data_end <= data_start { continue; }
-
-            let block_data = &data[data_start..data_end];
-
-            // 尝试解析 Block 里的 Shareholder
-            // 策略：简单粗暴的“字符串+Double”提取
-            // 因为不知道具体 Struct 对齐，我们在 Block 数据中寻找 Double 特征
-            let holders = Self::extract_holders_from_block(block_data, count);
-
-            // 构造 Record
-            // 只有当解析出数据才添加
-            if !holders.is_empty() {
-                let report_date = Self::ts_to_bj(ts_rep);
-                let announce_date = if Self::is_valid_ts(ts_ann) { Self::ts_to_bj(ts_ann) } else { report_date };
-
-                results.push(FinanceRecord {
-                    report_date,
-                    announce_date,
-                    data: FinanceData::TopHolder { holders }
-                });
-            }
+        if !current_holders.is_empty() {
+            results.push(FinanceRecord {
+                report_date: Self::ts_to_bj(current_report_ts),
+                announce_date: Self::ts_to_bj(current_announce_ts),
+                data: FinanceData::TopHolder {
+                    holders: current_holders,
+                },
+            });
         }
 
         Ok(results)
     }
 
-    /// 对单个变长 block 的启发式解析
-    fn extract_holders_from_block(block: &[u8], count: usize) -> Vec<Shareholder> {
-        // 这是一个启发式解析器 (Heuristic Parser)
-        // 假设：每个 Shareholder 记录包含 [Name String] ... [Shares Double] ... [Ratio Double]
-        // 我们可以根据 Record 数量平均分割 Block
-
-        let mut holders = Vec::new();
-        if count == 0 { return holders; }
-
-        let stride = block.len() / count;
-        if stride < 16 { return holders; } // 太短了不可能是记录
-
-        for i in 0..count {
-            let start = i * stride;
-            let end = (start + stride).min(block.len());
-            let rec_bytes = &block[start..end];
-
-            // 解析 Name: 通常在开头，UTF-8 字符串
-            let name = Self::read_string(rec_bytes, 0, 100); // 尝试读前100字节里的字符串
-
-            // 解析 Shares 和 Ratio:
-            // 扫描 record 里的 f64。通常 Shares 是很大的数，Ratio 是很小的数 (0~100)
-            // 且 Shares 通常在前
-            let mut found_doubles = Vec::new();
-            let mut off = 0;
-            while off + 8 <= rec_bytes.len() {
-                if let Some(val) = Self::read_f64(rec_bytes, off) {
-                    // 简单的过滤器
-                    if val.abs() > 0.0001 {
-                        found_doubles.push(val);
-                    }
-                }
-                off += 4; // 4字节对齐扫描
-            }
-
-            // 启发式赋值
-            let hold_amount = found_doubles.iter().find(|&&v| v > 10000.0).copied().unwrap_or(0.0);
-            let hold_ratio = found_doubles.iter().find(|&&v| v < 100.0 && v > 0.0).copied().unwrap_or(0.0);
-
-            // 尝试找“不变”、“新进”等关键词
-            let change = if Self::bytes_contain(rec_bytes, "不变") { "不变".to_string() }
-            else if Self::bytes_contain(rec_bytes, "新进") { "新进".to_string() }
-            else { "".to_string() };
-
-            if !name.is_empty() {
-                holders.push(Shareholder {
-                    name,
-                    hold_amount,
-                    hold_ratio,
-                    change,
-                    nature: "".to_string(), // 较难精确定位
-                    share_type: "".to_string(),
-                });
-            }
+    fn parse_top_holder_record(record: &[u8]) -> Shareholder {
+        Shareholder {
+            name: Self::read_string(record, 16, 192),
+            holder_type: Self::read_string(record, 216, 56),
+            hold_amount: Self::read_f64(record, 272).unwrap_or(0.0),
+            change_reason: Self::read_string(record, 280, 16),
+            hold_ratio: Self::read_f64(record, 304).unwrap_or(0.0),
+            share_type: Self::read_string(record, 312, 96),
+            rank: LittleEndian::read_u32(&record[412..416]),
         }
-        holders
     }
 
     fn is_valid_ts(ts: i64) -> bool {
@@ -415,11 +362,6 @@ impl FinanceReader {
         String::from_utf8_lossy(&slice[..actual_len]).trim().to_string()
     }
 
-    /// 字节序列中是否包含某个 UTF-8 片段
-    fn bytes_contain(data: &[u8], pattern: &str) -> bool {
-        let pat_bytes = pattern.as_bytes();
-        data.windows(pat_bytes.len()).any(|w| w == pat_bytes)
-    }
 }
 
 
@@ -511,9 +453,16 @@ mod tests {
         let res = FinanceReader::read_file(&path).expect("Failed to parse 7004");
         assert!(!res.is_empty(), "7004 should not be empty");
 
-        // 验证关键字段是否解析成功
-        if let FinanceData::Capital { total_share, .. } = &res[0].data {
-            assert!(*total_share > 0.0, "Total share should be positive");
+        if let FinanceData::Capital {
+            total_share,
+            flow_share,
+            restricted,
+            free_float_share,
+        } = &res[0].data {
+            assert_eq!(*total_share, 400_100_000.0);
+            assert_eq!(*flow_share, 40_080_000.0);
+            assert_eq!(*restricted, 0.0);
+            assert_eq!(*free_float_share, 40_080_000.0);
         } else {
             panic!("7004 parsed as wrong type");
         }
@@ -529,8 +478,20 @@ mod tests {
         let res = FinanceReader::read_file(&path).expect("Failed to parse 7005");
         assert!(!res.is_empty(), "7005 should not be empty");
 
-        if let FinanceData::HolderCount { total_holders, .. } = &res[0].data {
-            assert!(*total_holders > 0, "Holders count should be positive");
+        if let FinanceData::HolderCount {
+            total_holders,
+            a_holders,
+            b_holders,
+            h_holders,
+            float_holders,
+            other_holders,
+        } = &res[0].data {
+            assert_eq!(*total_holders, 35_719);
+            assert_eq!(*a_holders, 35_719);
+            assert_eq!(*b_holders, 0);
+            assert_eq!(*h_holders, 0);
+            assert_eq!(*float_holders, 0);
+            assert_eq!(*other_holders, 0);
         } else {
             panic!("7005 parsed as wrong type");
         }
@@ -544,18 +505,19 @@ mod tests {
         if !path.exists() { eprintln!("Skipping 7006: File not found"); return; }
 
         let res = FinanceReader::read_file(&path).expect("Failed to parse 7006");
-        // 7006 可能为空（如果数据未更新），但通常会有数据
-        // 注意：这里的 Record 代表一个“报告期”，里面的 data.holders 是该期的列表
+        assert!(!res.is_empty(), "7006 should not be empty");
 
-        if !res.is_empty() {
-            if let FinanceData::TopHolder { holders } = &res[0].data {
-                // 验证是否解析出了股东名称
-                if !holders.is_empty() {
-                    assert!(!holders[0].name.is_empty(), "Shareholder name should not be empty");
-                }
-            } else {
-                panic!("7006 parsed as wrong type");
-            }
+        if let FinanceData::TopHolder { holders } = &res[0].data {
+            assert_eq!(holders.len(), 40);
+            assert_eq!(holders[0].name, "中国航空技术深圳有限公司");
+            assert_eq!(holders[0].holder_type, "机构投资账户");
+            assert_eq!(holders[0].hold_amount, 158_128_000.0);
+            assert_eq!(holders[0].change_reason, "不变");
+            assert_eq!(holders[0].hold_ratio, 39.52);
+            assert_eq!(holders[0].share_type, "流通A股");
+            assert_eq!(holders[0].rank, 1);
+        } else {
+            panic!("7006 parsed as wrong type");
         }
 
         print_head(7006, &res);
@@ -567,16 +529,19 @@ mod tests {
         if !path.exists() { eprintln!("Skipping 7007: File not found"); return; }
 
         let res = FinanceReader::read_file(&path).expect("Failed to parse 7007");
+        assert!(!res.is_empty(), "7007 should not be empty");
 
-        if !res.is_empty() {
-            if let FinanceData::TopHolder { holders } = &res[0].data {
-                // 验证 UTF-8 中文解析
-                if !holders.is_empty() {
-                    println!("Sample 7007 Holder Name: {}", holders[0].name);
-                }
-            } else {
-                panic!("7007 parsed as wrong type");
-            }
+        if let FinanceData::TopHolder { holders } = &res[0].data {
+            assert_eq!(holders.len(), 10);
+            assert_eq!(holders[0].name, "中国工商银行-诺安股票证券投资基金");
+            assert_eq!(holders[0].holder_type, "机构投资账户");
+            assert_eq!(holders[0].hold_amount, 1_799_860.0);
+            assert_eq!(holders[0].change_reason, "不变");
+            assert_eq!(holders[0].hold_ratio, 0.45);
+            assert_eq!(holders[0].share_type, "流通A股");
+            assert_eq!(holders[0].rank, 1);
+        } else {
+            panic!("7007 parsed as wrong type");
         }
 
         print_head(7007, &res);

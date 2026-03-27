@@ -51,8 +51,8 @@ QMT 的财务数据存储在本地文件系统中，采用 **二进制序列化*
 | **7003** | 现金流量表 (Cash Flow) | 定长 (Fixed) | 656 Bytes |
 | **7004** | 股本结构 (Capital Structure) | 定长 (Fixed) | 56 Bytes |
 | **7005** | 股东户数 (Shareholder Num) | 定长 (Fixed) | 64 Bytes |
-| **7006** | 十大流通股东 (Top 10 Float) | **变长 (Variable)** | N/A |
-| **7007** | 十大股东 (Top 10 Holders) | **变长 (Variable)** | N/A |
+| **7006** | 十大流通股东 (Top Float Holder) | 定长 (Fixed) | 416 Bytes |
+| **7007** | 十大股东 (Top Holders) | 定长 (Fixed) | 416 Bytes |
 | **7008** | 财务比率/每股指标 (Ratios) | 定长 (Fixed) | 344 Bytes |
 
 ---
@@ -89,7 +89,7 @@ QMT 的财务数据存储在本地文件系统中，采用 **二进制序列化*
 | `0x10` ... `0x157` | Double[41] | **Ratios** | 指标数据列，共 41 个 Double。 |
 
 ### 2.3 股本结构 (7004)
-存储总股本、流通股本及变动原因。
+存储总股本、流通股本、限售股和自由流通股。
 
 *   **记录长度 (Stride)**: 56 Bytes
 *   **结构定义**:
@@ -101,8 +101,8 @@ QMT 的财务数据存储在本地文件系统中，采用 **二进制序列化*
 | `0x10` | Double | **TotalShare** | 总股本 |
 | `0x18` | Double | **FlowShare** | 流通股本 |
 | `0x20` | Double | **Restricted** | 限售股本 |
-| `0x28` | Double | **Reserved** | 保留字段 (通常为 0) |
-| `0x30` ... `0x37` | Byte[8] | **Reason** | 变动原因/标签 (String) |
+| `0x28` | Double | **FreeFloatShare** | 自由流通股份 |
+| `0x30` ... `0x37` | Byte[8] | **Padding** | 保留字段 |
 
 ### 2.4 股东户数 (7005)
 
@@ -114,60 +114,44 @@ QMT 的财务数据存储在本地文件系统中，采用 **二进制序列化*
 | `0x00` | Int64 | **AnnounceDate**| **注意**: 7005 的时间戳顺序可能反转，需按数值大小判断。 |
 | `0x08` | Int64 | **ReportDate** | 报告期 (截止日) |
 | `0x10` | Double | **TotalHolders**| 股东总户数 |
-| `0x18` | Double | **AvgShare** | 平均持股数 / A股户数 |
-| `0x20` ... `0x3F` | Byte[32]| **Padding** | 填充/保留字段 (通常全 0) |
+| `0x18` | Double | **AHolders** | A股股东户数 |
+| `0x20` | Double | **BHolders** | B股股东户数 |
+| `0x28` | Double | **HHolders** | H股股东户数 |
+| `0x30` | Double | **FloatHolders** | 已流通股东户数 |
+| `0x38` | Double | **OtherHolders** | 未流通股东户数 |
 
 ---
 
-## 3. 变长格式规范 (Variable-Length Format)
+## 3. 十大股东定长格式 (7006 / 7007)
 
-适用于 Type ID: **7006 (十大流通), 7007 (十大股东)**。
-由于包含不确定长度的 UTF-8 字符串（如股东名称），该格式采用 **Block-Array** 结构。
+适用于 Type ID: **7006 (十大流通股东)**、**7007 (十大股东)**。
 
-### 3.1 总体结构
-文件由多个 **时间块 (Time Block)** 组成。每个块包含该时间点的所有股东记录。
+这两类文件并非变长块，而是 **416 字节定长记录**。每条记录都自带一组时间戳；同一报告期的多条连续记录应在上层按 `(ReportDate, AnnounceDate)` 聚合。
+
+### 3.1 单条记录结构
+
+| 偏移 (Offset) | 类型 | 字段名 | 说明 |
+| :--- | :--- | :--- | :--- |
+| `0x00` | Int64 | **AnnounceDate** | 公告日期 |
+| `0x08` | Int64 | **ReportDate** | 截止日期 / 报告期 |
+| `0x10` ... `0xCF` | Char[192] | **Name** | 股东名称，UTF-8，`\0` 截断 |
+| `0xD8` ... `0x10F` | Char[56] | **HolderType** | 股东类型，如“机构投资账户” |
+| `0x110` | Double | **HoldAmount** | 持股数量 |
+| `0x118` ... `0x127` | Char[16] | **ChangeReason** | 变动原因，如“不变” |
+| `0x130` | Double | **HoldRatio** | 持股比例 |
+| `0x138` ... `0x197` | Char[96] | **ShareType** | 股份性质，如“流通A股”/“流通受限股份” |
+| `0x19C` | UInt32 | **Rank** | 持股排名 |
+
+### 3.2 聚合方式
+
+解析器应顺序读取 416 字节定长记录，并将连续的同日期记录聚合成一个逻辑报告期：
 
 ```text
-[Block 1 Header]
-[Record 1]
-[Record 2]
+[AnnounceDate, ReportDate, Holder #1]
+[AnnounceDate, ReportDate, Holder #2]
 ...
-[Record N]
-----------------
-[Block 2 Header]
-[Record 1]
-...
+[NextAnnounceDate, NextReportDate, Holder #1]
 ```
-
-### 3.2 块头定义 (Block Header)
-虽然是变长，但可以通过扫描时间戳特征来定位块头。
-
-| 相对偏移 | 类型 | 字段名 | 说明 |
-| :--- | :--- | :--- | :--- |
-| `0x00` | Int64 | **ReportDate** | 报告期 |
-| `0x08` | Int64 | **AnnounceDate**| 公告日期 |
-| `0x10` | Int32/64 | **Count** | (推测) 该块包含的股东记录数，或直接接第一条记录。 |
-
-### 3.3 股东记录定义 (Shareholder Record)
-每条记录紧跟在头部或其他记录之后。记录长度固定（包含定长的字符串缓冲区），但不同版本的 QMT 可能调整缓冲区大小。**当前观测版本**结构如下：
-
-*   **估算长度**: 约 260 ~ 300 Bytes (取决于字符串预留空间)
-
-| 数据域 | 类型 | 内容 | 说明 |
-| :--- | :--- | :--- | :--- |
-| **Info** | String | **股东名称** | UTF-8 编码，定长 Buffer (如 128 bytes)，以 `\0` 结尾。 |
-| **Type** | String | **股东性质** | UTF-8, e.g., "自然人", "国有法人"。 |
-| **Shares** | Double | **持股数量** | |
-| **Ratio** | Double | **持股比例** | e.g., 1.25 表示 1.25%。 |
-| **Change** | String | **变动状态** | UTF-8, e.g., "不变", "新进"。 |
-| **Class** | String | **股份类型** | UTF-8, e.g., "流通A股"。 |
-| **Rank** | Int32 | **排名** | 第几大股东。 |
-
-**解析策略建议**:
-由于字符串字段可能有 Padding，建议读取时采用 **边界扫描法**：
-1.  定位 Block Header（根据时间戳特征）。
-2.  顺序读取字段，读取字符串时读取直到遇到 `0x00`，并跳过剩余 Padding 字节直到下一个字段的起始位置（通常对齐到 4 或 8 字节）。
-3.  或直接将整个 Block 读入内存，利用 UTF-8 字符串的特征进行正则提取。
 
 ---
 
@@ -207,7 +191,7 @@ impl FixedReader {
     *   若 Stride == 344 -> 比率 (7008)
     *   若 Stride == 56 -> 股本 (7004)
     *   若 Stride == 64 -> 股东数 (7005)
-    *   若 Stride 不固定 -> 十大股东 (7006/7007)
+    *   若 Stride == 416 -> 十大股东 / 十大流通股东 (7006/7007)
 
 ---
 
