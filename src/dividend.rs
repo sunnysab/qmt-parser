@@ -3,6 +3,7 @@ use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
 use rusty_leveldb::{DB, Options, LdbIterator};
 use std::path::Path;
 use std::str;
+use thiserror::Error;
 
 /// 除权/分红数据结构
 #[derive(Debug, Clone)]
@@ -20,6 +21,22 @@ pub struct DividendRecord {
     pub timestamp_raw: i64,    // 原始时间戳
 }
 
+#[derive(Debug, Error)]
+pub enum DividendError {
+    #[error("无法打开 LevelDB: {0}")]
+    OpenDb(String),
+    #[error("无法创建 LevelDB 迭代器")]
+    IteratorUnavailable,
+    #[error("非法的分红 Key: {0}")]
+    InvalidKey(String),
+    #[error("分红 Key 不是有效 UTF-8")]
+    InvalidUtf8Key,
+    #[error("无效的分红时间戳: {0}")]
+    InvalidTimestamp(i64),
+    #[error("无法解析分红 Value: {0}")]
+    InvalidValue(String),
+}
+
 pub struct DividendDb {
     db: DB,
 }
@@ -28,21 +45,21 @@ impl DividendDb {
     /// 打开数据库
     /// 注意：LevelDB 同时只能被一个进程加锁访问。如果 QMT 在运行，这里可能会失败。
     /// 建议传入备份目录路径。
-    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, String> {
+    pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, DividendError> {
         let mut options = Options::default();
         // 设为只读模式稍安全，但 rusty-leveldb 主要是靠文件锁
         options.create_if_missing = false;
 
         match DB::open(path, options) {
             Ok(db) => Ok(Self { db }),
-            Err(e) => Err(format!("无法打开 LevelDB: {}", e)),
+            Err(e) => Err(DividendError::OpenDb(e.to_string())),
         }
     }
 
     /// 查询指定股票/债券的除权信息
     /// market: "SH", "SZ", "BJ"
     /// code: "185222", "600000" 等
-    pub fn query(&mut self, market: &str, code: &str) -> Vec<DividendRecord> {
+    pub fn query(&mut self, market: &str, code: &str) -> Result<Vec<DividendRecord>, DividendError> {
         let mut results = Vec::new();
 
         // 构造 Key 前缀，例如 "SH|185222"
@@ -51,7 +68,10 @@ impl DividendDb {
         let prefix_bytes = prefix.as_bytes();
 
         // 创建迭代器
-        let mut iter = self.db.new_iter().unwrap();
+        let mut iter = self
+            .db
+            .new_iter()
+            .map_err(|_| DividendError::IteratorUnavailable)?;
 
         // Seek 到第一个匹配前缀的位置
         iter.seek(prefix_bytes);
@@ -64,18 +84,10 @@ impl DividendDb {
 
             // 2. 解析 Key，提取时间戳
             // Key 格式: "SH|185222|4000|1736697600000"
-            let key_str = match str::from_utf8(&key) {
-                Ok(s) => s,
-                Err(_) => continue, // 非法 Key 忽略
+            let ts_key = match Self::parse_key_timestamp(&key)? {
+                Some(ts_key) => ts_key,
+                None => continue,
             };
-
-            let parts: Vec<&str> = key_str.split('|').collect();
-            if parts.len() < 4 {
-                continue;
-            }
-
-            // 解析时间戳 (Key 的最后一部分)
-            let ts_key: i64 = parts.last().unwrap().parse().unwrap_or(0);
 
             // 3. 过滤无效的哨兵数据 (0 或 999999...)
             // 999999999999 对应 2001-09-09，是 LevelDB 常用的 End Sentinel
@@ -84,14 +96,14 @@ impl DividendDb {
             }
 
             // 4. 解析 Value (C++ Struct 二进制)
-            if let Some(record) = Self::parse_value(&value) {
+            if let Some(record) = Self::parse_value(&value)? {
                 // 双重校验：通常 Value 里的时间戳应该和 Key 里的接近或一致
-                // 这里我们信任 Value 解析出的数据，或者以 Key 为准
+                // 当前实现保留 Value 为真值，但不再静默吞掉解析错误。
                 results.push(record);
             }
         }
 
-        results
+        Ok(results)
     }
 
     /// 解析二进制 Value
@@ -100,12 +112,21 @@ impl DividendDb {
     /// [interest] [stock_bonus] [stock_gift] [allot_num] [allot_price]
     /// [gugai] [unknown64] [adjust_factor]
     /// [record_date: u32] [padding: u32] [ex_dividend_date: u32] [padding: u32]
-    fn parse_value(data: &[u8]) -> Option<DividendRecord> {
+    fn parse_value(data: &[u8]) -> Result<Option<DividendRecord>, DividendError> {
+        if data.is_empty() {
+            return Ok(None);
+        }
         if data.len() < 96 {
-            return None;
+            return Err(DividendError::InvalidValue(format!(
+                "value too short: expected at least 96 bytes, got {}",
+                data.len()
+            )));
         }
 
         let ts_val = LittleEndian::read_i64(&data[8..16]);
+        if ts_val <= 0 {
+            return Err(DividendError::InvalidTimestamp(ts_val));
+        }
         let interest = LittleEndian::read_f64(&data[16..24]);
         let stock_bonus = LittleEndian::read_f64(&data[24..32]);
         let stock_gift = LittleEndian::read_f64(&data[32..40]);
@@ -117,9 +138,10 @@ impl DividendDb {
 
         let record_date = Self::parse_yyyymmdd_u32(LittleEndian::read_u32(&data[80..84]));
         let ex_dividend_date = Self::parse_yyyymmdd_u32(LittleEndian::read_u32(&data[88..92]))
-            .or_else(|| Self::date_from_timestamp_bj(ts_val))?;
+            .or_else(|| Self::date_from_timestamp_bj(ts_val))
+            .ok_or_else(|| DividendError::InvalidTimestamp(ts_val))?;
 
-        Some(DividendRecord {
+        Ok(Some(DividendRecord {
             ex_dividend_date,
             record_date,
             interest,
@@ -131,7 +153,27 @@ impl DividendDb {
             unknown64_raw,
             adjust_factor,
             timestamp_raw: ts_val,
-        })
+        }))
+    }
+
+    fn parse_key_timestamp(key: &[u8]) -> Result<Option<i64>, DividendError> {
+        let key_str = str::from_utf8(key).map_err(|_| DividendError::InvalidUtf8Key)?;
+        let parts: Vec<&str> = key_str.split('|').collect();
+        if parts.len() < 4 {
+            return Err(DividendError::InvalidKey(key_str.to_string()));
+        }
+
+        let ts = parts
+            .last()
+            .ok_or_else(|| DividendError::InvalidKey(key_str.to_string()))?
+            .parse::<i64>()
+            .map_err(|_| DividendError::InvalidKey(key_str.to_string()))?;
+
+        if ts == 0 || ts > 3_000_000_000_000 {
+            return Ok(None);
+        }
+
+        Ok(Some(ts))
     }
 
     fn parse_yyyymmdd_u32(raw: u32) -> Option<NaiveDate> {
@@ -171,7 +213,7 @@ fn test_dividend() {
 
     // 查询 21国债16 (SH.185222)
     println!("正在查询 SH.185222 ...");
-    let records = qmt_db.query("SH", "185222");
+    let records = qmt_db.query("SH", "185222").expect("query dividend");
 
     if records.is_empty() {
         eprintln!("未找到记录或解析失败。");
@@ -198,7 +240,7 @@ fn test_parse_dividend_value_cash_dates_and_factor() {
     )
     .unwrap();
 
-    let record = DividendDb::parse_value(&raw).expect("should parse");
+    let record = DividendDb::parse_value(&raw).expect("should parse").expect("record");
     assert_eq!(record.ex_dividend_date, NaiveDate::from_ymd_opt(2023, 1, 12).unwrap());
     assert_eq!(record.record_date, Some(NaiveDate::from_ymd_opt(2023, 1, 11).unwrap()));
     assert_eq!(record.interest, 3.17);
@@ -216,7 +258,7 @@ fn test_parse_dividend_value_bonus_gift_and_rights_issue() {
         "2087c6faff7f000000e4f9da630100009a9999999999b93f0000000000000000000000000000e03f0000000000000000000000000000000000000000000000000000000000000000b56b425a6350f83f7fee33010000000080ee330100000000",
     )
     .unwrap();
-    let bonus_record = DividendDb::parse_value(&bonus_raw).expect("should parse");
+    let bonus_record = DividendDb::parse_value(&bonus_raw).expect("should parse").expect("record");
     assert_eq!(bonus_record.ex_dividend_date, NaiveDate::from_ymd_opt(2018, 6, 8).unwrap());
     assert_eq!(bonus_record.record_date, Some(NaiveDate::from_ymd_opt(2018, 6, 7).unwrap()));
     assert_eq!(bonus_record.interest, 0.1);
@@ -231,7 +273,7 @@ fn test_parse_dividend_value_bonus_gift_and_rights_issue() {
         "2087c6faff7f00000040675d27010000000000000000000000000000000000000000000000000000a4703d0ad7a3c03f3333333333b3214000000000000000000000000000000000ae9b525e2be1f03fd0b43201000000000000000000000000",
     )
     .unwrap();
-    let rights_record = DividendDb::parse_value(&rights_raw).expect("should parse");
+    let rights_record = DividendDb::parse_value(&rights_raw).expect("should parse").expect("record");
     assert_eq!(rights_record.ex_dividend_date, NaiveDate::from_ymd_opt(2010, 3, 15).unwrap());
     assert_eq!(rights_record.record_date, Some(NaiveDate::from_ymd_opt(2010, 3, 4).unwrap()));
     assert_eq!(rights_record.interest, 0.0);
@@ -250,7 +292,7 @@ fn test_parse_dividend_value_gugai_slot() {
     )
     .unwrap();
 
-    let record = DividendDb::parse_value(&raw).expect("should parse");
+    let record = DividendDb::parse_value(&raw).expect("should parse").expect("record");
     assert_eq!(record.ex_dividend_date, NaiveDate::from_ymd_opt(2025, 1, 12).unwrap());
     assert_eq!(record.record_date, Some(NaiveDate::from_ymd_opt(2025, 1, 10).unwrap()));
     assert_eq!(record.interest, 3.17);
@@ -260,6 +302,21 @@ fn test_parse_dividend_value_gugai_slot() {
     assert_eq!(record.allot_price, 0.0);
     assert_eq!(record.gugai, 100.0);
     assert!((record.adjust_factor - 1.032558).abs() < 1e-9);
+}
+
+#[test]
+fn test_dividend_open_missing_db_returns_typed_error() {
+    match DividendDb::new("/definitely/missing/dividend-db") {
+        Err(DividendError::OpenDb(_)) => {}
+        Err(other) => panic!("unexpected error: {other}"),
+        Ok(_) => panic!("expected missing db to fail"),
+    }
+}
+
+#[test]
+fn test_parse_dividend_key_timestamp_rejects_invalid_key() {
+    let err = DividendDb::parse_key_timestamp(b"SH|185222").unwrap_err();
+    assert!(matches!(err, DividendError::InvalidKey(_)));
 }
 
 #[cfg(test)]
