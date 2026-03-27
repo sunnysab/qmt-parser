@@ -4,8 +4,10 @@
 mod tick_analysis;
 
 use qmt_parser::TickData;
-use tick_analysis::{load_tick_dataframe, load_tick_structs, sample_tick_path};
-use tick_analysis::{Workload, analyze_ticks_vec};
+use tick_analysis::{
+    Workload, analyze_ticks_polars, analyze_ticks_vec, assert_summary_close, load_tick_dataframe,
+    load_tick_structs, sample_tick_path,
+};
 
 fn assert_option_f64_eq(left: Option<f64>, right: Option<f64>) {
     match (left, right) {
@@ -121,4 +123,27 @@ fn vec_mixed_orderbook_matches_expected_summary() {
     assert_option_f64_eq(summary.mid_price_mean, Some(11.0));
     assert_option_f64_eq(summary.ask_vol_sum_5_mean, Some(6.0));
     assert_option_f64_eq(summary.bid_vol_sum_5_mean, Some(8.0));
+}
+
+#[test]
+fn sample_basic_scan_vec_and_polars_match() {
+    let rows = load_tick_structs().expect("tick structs");
+    let df = load_tick_dataframe().expect("tick dataframe");
+
+    let vec_summary = analyze_ticks_vec(&rows, Workload::BasicScan);
+    let polars_summary = analyze_ticks_polars(&df, Workload::BasicScan).expect("polars summary");
+
+    assert_summary_close(&vec_summary, &polars_summary, 1e-9);
+}
+
+#[test]
+fn sample_mixed_orderbook_vec_and_polars_match() {
+    let rows = load_tick_structs().expect("tick structs");
+    let df = load_tick_dataframe().expect("tick dataframe");
+
+    let vec_summary = analyze_ticks_vec(&rows, Workload::MixedOrderBook);
+    let polars_summary =
+        analyze_ticks_polars(&df, Workload::MixedOrderBook).expect("polars summary");
+
+    assert_summary_close(&vec_summary, &polars_summary, 1e-9);
 }
