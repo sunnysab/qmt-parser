@@ -1,3 +1,16 @@
+//! Tick 分笔解析。
+//!
+//! 对外暴露两类入口：
+//!
+//! - [`TickReader`]：按记录流式读取
+//! - [`parse_ticks_to_structs`] / [`parse_ticks_to_dataframe`]：一次性读取整个文件
+//!
+//! 这个模块会尝试从文件路径中提取 `market`、`symbol`、`date` 元数据，
+//! 同时兼容：
+//!
+//! - `000001-20250529-tick.dat`
+//! - `.../SZ/0/000001/20250529.dat`
+
 use std::fs::File;
 use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
@@ -19,6 +32,7 @@ const QMT_TICK_TIME_OFFSET_MS: u32 = 396_300_000;
 #[cfg(any(test, feature = "polars"))]
 const BJ_TICK_TIME_OFFSET_MS: u32 = 50_400_000;
 
+/// QMT `get_full_tick` 文档中的正式字段名顺序。
 pub const FULL_TICK_API_FIELD_NAMES: [&str; 17] = [
     "lastPrice",
     "amount",
@@ -39,6 +53,7 @@ pub const FULL_TICK_API_FIELD_NAMES: [&str; 17] = [
     "timetag",
 ];
 
+/// `parse_ticks_to_dataframe` 当前输出的列名顺序。
 pub const TICK_DATAFRAME_COLUMN_NAMES: [&str; 26] = [
     "market",
     "symbol",
@@ -68,35 +83,52 @@ pub const TICK_DATAFRAME_COLUMN_NAMES: [&str; 26] = [
     "pe",
 ];
 
+/// 返回 QMT `get_full_tick` 文档中的正式字段名顺序。
 pub fn tick_api_field_names() -> &'static [&'static str] {
     &FULL_TICK_API_FIELD_NAMES
 }
 
+/// 返回当前 Tick `DataFrame` 输出列名顺序。
 pub fn tick_dataframe_column_names() -> &'static [&'static str] {
     &TICK_DATAFRAME_COLUMN_NAMES
 }
 
-/// Level 1: 原始 Tick 结构体 (定长数组)
+/// 单条 Tick 分笔记录。
 #[derive(Debug, Clone)]
 pub struct TickData {
+    /// 从路径推导出的市场代码，如 `SH`、`SZ`、`BJ`。
     pub market: Option<String>,
+    /// 证券代码。
     pub symbol: String,
+    /// 交易日，格式为 `YYYYMMDD`。
     pub date: String,
+    /// QMT 文件中的原始时间戳字段。
     pub raw_qmt_timestamp: u32,
+    /// 市场阶段状态字段。
     pub market_phase_status: u32,
+    /// 最新成交价。
     pub last_price: Option<f64>,
+    /// 昨收价。
     pub last_close: f64,
+    /// 成交额。
     pub amount: Option<f64>,
+    /// 成交量。
     pub volume: Option<u64>,
+    /// 卖一到卖五价格。
     pub ask_prices: [Option<f64>; 5],
+    /// 卖一到卖五挂单量。
     pub ask_vols: [Option<u32>; 5],
+    /// 买一到买五价格。
     pub bid_prices: [Option<f64>; 5],
+    /// 买一到买五挂单量。
     pub bid_vols: [Option<u32>; 5],
+    /// QMT 原始状态字段 1。
     pub qmt_status_field_1_raw: u32,
+    /// QMT 原始状态字段 2。
     pub qmt_status_field_2_raw: u32,
 }
 
-/// Level 2: 迭代器 Reader
+/// 流式读取 Tick 文件的迭代器。
 pub struct TickReader<R: Read> {
     reader: BufReader<R>,
     market: Option<String>,
@@ -106,6 +138,9 @@ pub struct TickReader<R: Read> {
 }
 
 impl TickReader<File> {
+    /// 从 Tick 文件路径创建读取器。
+    ///
+    /// 这个方法会校验扩展名，并从路径中提取市场、证券代码和交易日。
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, TickParseError> {
         let path = path.as_ref();
         validate_dat_path(path)?;
@@ -116,6 +151,7 @@ impl TickReader<File> {
 }
 
 impl<R: Read> TickReader<R> {
+    /// 从任意 `Read` 实例构造 Tick 读取器。
     pub fn new(
         reader: R,
         market: Option<String>,
@@ -145,13 +181,32 @@ impl<R: Read> Iterator for TickReader<R> {
 
         let mut cursor = Cursor::new(&self.buffer[..]);
         Some(
-            parse_single_record(&mut cursor, self.market.as_deref(), &self.symbol, &self.date)
-                .map_err(TickParseError::Io),
+            parse_single_record(
+                &mut cursor,
+                self.market.as_deref(),
+                &self.symbol,
+                &self.date,
+            )
+            .map_err(TickParseError::Io),
         )
     }
 }
 
-/// Level 3 API: 返回 Vec<TickData>
+/// 把 Tick 文件完整解析为 `Vec<TickData>`。
+///
+/// # Examples
+///
+/// ```no_run
+/// use qmt_parser::parse_ticks_to_structs;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let ticks = parse_ticks_to_structs("data/000001-20250529-tick.dat")?;
+/// if let Some(first) = ticks.first() {
+///     println!("{:?}", first.last_price);
+/// }
+/// # Ok(())
+/// # }
+/// ```
 pub fn parse_ticks_to_structs(path: impl AsRef<Path>) -> Result<Vec<TickData>, TickParseError> {
     let path_ref = path.as_ref();
     let estimated_rows = estimate_rows(path_ref)?;
@@ -163,7 +218,28 @@ pub fn parse_ticks_to_structs(path: impl AsRef<Path>) -> Result<Vec<TickData>, T
     Ok(rows)
 }
 
-/// Level 3 API: 返回 DataFrame
+/// 把 Tick 文件完整解析为 Polars `DataFrame`。
+///
+/// 返回的列顺序可通过 [`tick_dataframe_column_names`] 获取。
+///
+/// `time` 列会在库内按市场规则把 QMT 原始时间戳转换为
+/// `Datetime[ms, Asia/Shanghai]`。
+///
+/// # Examples
+///
+/// ```no_run
+/// # #[cfg(feature = "polars")]
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use qmt_parser::parse_ticks_to_dataframe;
+///
+/// let df = parse_ticks_to_dataframe("data/000001-20250529-tick.dat")?;
+/// println!("{:?}", df.shape());
+/// # Ok(())
+/// # }
+/// #
+/// # #[cfg(not(feature = "polars"))]
+/// # fn main() {}
+/// ```
 #[cfg(feature = "polars")]
 pub fn parse_ticks_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame, TickParseError> {
     let path_ref = path.as_ref();
@@ -289,7 +365,8 @@ pub fn parse_ticks_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame, Tic
 
 #[cfg(any(test, feature = "polars"))]
 fn decode_qmt_timestamp_ms(raw: u32) -> Option<u32> {
-    raw.checked_sub(QMT_TICK_TIME_OFFSET_MS).filter(|ms| *ms < 86_400_000)
+    raw.checked_sub(QMT_TICK_TIME_OFFSET_MS)
+        .filter(|ms| *ms < 86_400_000)
 }
 
 #[cfg(any(test, feature = "polars"))]
@@ -337,7 +414,9 @@ fn validate_dat_path(path: &Path) -> Result<(), TickParseError> {
     Ok(())
 }
 
-fn extract_tick_file_metadata(path: &Path) -> Result<(Option<String>, String, String), TickParseError> {
+fn extract_tick_file_metadata(
+    path: &Path,
+) -> Result<(Option<String>, String, String), TickParseError> {
     let filename = path
         .file_name()
         .and_then(|s| s.to_str())
@@ -379,7 +458,6 @@ fn estimate_rows(path: &Path) -> Result<usize, TickParseError> {
     Ok((file_len as usize) / RECORD_SIZE + 1)
 }
 
-/// 从单个144字节的记录中解析出核心数据，返回一个 TickData 实例
 fn parse_single_record(
     cursor: &mut Cursor<&[u8]>,
     market: Option<&str>,
@@ -525,7 +603,10 @@ mod test {
             compose_tick_datetime_ms(None, "20250529", 429_610_528),
             Some(1_748_481_310_528),
         );
-        assert_eq!(decode_qmt_timestamp_ms_for_market(Some("BJ"), 2_070_911_528), Some(33_311_528));
+        assert_eq!(
+            decode_qmt_timestamp_ms_for_market(Some("BJ"), 2_070_911_528),
+            Some(33_311_528)
+        );
     }
 
     #[test]

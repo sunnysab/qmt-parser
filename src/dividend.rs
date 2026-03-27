@@ -1,53 +1,88 @@
+//! QMT 分红送配 LevelDB 查询。
+//!
+//! 这个模块读取 `DividData` 目录中的 LevelDB 数据，并把单条 value 解码为
+//! [`DividendRecord`]。
+
 use byteorder::{ByteOrder, LittleEndian};
 use chrono::{DateTime, FixedOffset, NaiveDate, Utc};
-use rusty_leveldb::{DB, Options, LdbIterator};
+use rusty_leveldb::{DB, LdbIterator, Options};
 use std::path::Path;
 use std::str;
 use thiserror::Error;
 
-/// 除权/分红数据结构
+/// 单条除权除息记录。
 #[derive(Debug, Clone)]
 pub struct DividendRecord {
-    pub ex_dividend_date: NaiveDate, // 除权除息日
-    pub record_date: Option<NaiveDate>, // 股权登记日
-    pub interest: f64,         // 每股红利
-    pub stock_bonus: f64,      // 每股送股
-    pub stock_gift: f64,       // 每股转赠
-    pub allot_num: f64,        // 配股数量
-    pub allot_price: f64,      // 配股价
-    pub gugai: f64,            // 股改相关值，QMT API 常解释为“是否股改”
-    pub unknown64_raw: f64,    // 当前版本存在但语义未完全确认的额外槽位
-    pub adjust_factor: f64,    // 复权系数
-    pub timestamp_raw: i64,    // 原始时间戳
+    /// 除权除息日。
+    pub ex_dividend_date: NaiveDate,
+    /// 股权登记日。
+    pub record_date: Option<NaiveDate>,
+    /// 每股现金红利。
+    pub interest: f64,
+    /// 每股送股。
+    pub stock_bonus: f64,
+    /// 每股转赠。
+    pub stock_gift: f64,
+    /// 配股数量。
+    pub allot_num: f64,
+    /// 配股价格。
+    pub allot_price: f64,
+    /// 股改相关值，当前仍保留原始含义。
+    pub gugai: f64,
+    /// 当前版本存在但语义未完全确认的额外槽位。
+    pub unknown64_raw: f64,
+    /// 复权系数。
+    pub adjust_factor: f64,
+    /// Value 中记录的原始时间戳。
+    pub timestamp_raw: i64,
 }
 
+/// 分红数据库读取错误。
 #[derive(Debug, Error)]
 pub enum DividendError {
+    /// LevelDB 打开失败。
     #[error("无法打开 LevelDB: {0}")]
     OpenDb(String),
+    /// 无法创建数据库迭代器。
     #[error("无法创建 LevelDB 迭代器")]
     IteratorUnavailable,
+    /// Key 结构不符合预期。
     #[error("非法的分红 Key: {0}")]
     InvalidKey(String),
+    /// Key 不是合法 UTF-8。
     #[error("分红 Key 不是有效 UTF-8")]
     InvalidUtf8Key,
+    /// 时间戳非法。
     #[error("无效的分红时间戳: {0}")]
     InvalidTimestamp(i64),
+    /// Value 结构不符合预期。
     #[error("无法解析分红 Value: {0}")]
     InvalidValue(String),
 }
 
+/// 分红 LevelDB 查询句柄。
 pub struct DividendDb {
     db: DB,
 }
 
 impl DividendDb {
-    /// 打开数据库
-    /// 注意：LevelDB 同时只能被一个进程加锁访问。如果 QMT 在运行，这里可能会失败。
-    /// 建议传入备份目录路径。
+    /// 打开 `DividData` 数据库目录。
+    ///
+    /// 注意：LevelDB 同时只能被一个进程加锁访问；如果 QMT 正在运行，
+    /// 打开原目录可能失败，通常建议传入备份目录。
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use qmt_parser::dividend::DividendDb;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let _db = DividendDb::new("/path/to/DividData")?;
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, DividendError> {
         let mut options = Options::default();
-        // 设为只读模式稍安全，但 rusty-leveldb 主要是靠文件锁
         options.create_if_missing = false;
 
         match DB::open(path, options) {
@@ -56,49 +91,54 @@ impl DividendDb {
         }
     }
 
-    /// 查询指定股票/债券的除权信息
-    /// market: "SH", "SZ", "BJ"
-    /// code: "185222", "600000" 等
-    pub fn query(&mut self, market: &str, code: &str) -> Result<Vec<DividendRecord>, DividendError> {
+    /// 查询指定市场和证券代码的除权除息记录。
+    ///
+    /// `market` 典型值为 `SH`、`SZ`、`BJ`。
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use qmt_parser::dividend::DividendDb;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let mut db = DividendDb::new("/path/to/DividData")?;
+    /// let records = db.query("SH", "600000")?;
+    /// println!("records = {}", records.len());
+    /// # Ok(())
+    /// # }
+    /// ```
+    pub fn query(
+        &mut self,
+        market: &str,
+        code: &str,
+    ) -> Result<Vec<DividendRecord>, DividendError> {
         let mut results = Vec::new();
 
-        // 构造 Key 前缀，例如 "SH|185222"
-        // 注意：实际 Key 可能是 "SH|185222|4000|..."
         let prefix = format!("{}|{}|", market, code);
         let prefix_bytes = prefix.as_bytes();
 
-        // 创建迭代器
         let mut iter = self
             .db
             .new_iter()
             .map_err(|_| DividendError::IteratorUnavailable)?;
 
-        // Seek 到第一个匹配前缀的位置
         iter.seek(prefix_bytes);
 
         while let Some((key, value)) = iter.next() {
-            // 1. 检查 Key 是否以前缀开头，如果不是则说明已经遍历完该标的的数据
             if !key.starts_with(prefix_bytes) {
                 break;
             }
 
-            // 2. 解析 Key，提取时间戳
-            // Key 格式: "SH|185222|4000|1736697600000"
             let ts_key = match Self::parse_key_timestamp(&key)? {
                 Some(ts_key) => ts_key,
                 None => continue,
             };
 
-            // 3. 过滤无效的哨兵数据 (0 或 999999...)
-            // 999999999999 对应 2001-09-09，是 LevelDB 常用的 End Sentinel
             if ts_key == 0 || ts_key > 3_000_000_000_000 {
                 continue;
             }
 
-            // 4. 解析 Value (C++ Struct 二进制)
             if let Some(record) = Self::parse_value(&value)? {
-                // 双重校验：通常 Value 里的时间戳应该和 Key 里的接近或一致
-                // 当前实现保留 Value 为真值，但不再静默吞掉解析错误。
                 results.push(record);
             }
         }
@@ -196,7 +236,6 @@ impl DividendDb {
     }
 }
 
-
 #[test]
 fn test_dividend() {
     // 假设这是你复制出来的临时目录，避免锁冲突
@@ -240,9 +279,17 @@ fn test_parse_dividend_value_cash_dates_and_factor() {
     )
     .unwrap();
 
-    let record = DividendDb::parse_value(&raw).expect("should parse").expect("record");
-    assert_eq!(record.ex_dividend_date, NaiveDate::from_ymd_opt(2023, 1, 12).unwrap());
-    assert_eq!(record.record_date, Some(NaiveDate::from_ymd_opt(2023, 1, 11).unwrap()));
+    let record = DividendDb::parse_value(&raw)
+        .expect("should parse")
+        .expect("record");
+    assert_eq!(
+        record.ex_dividend_date,
+        NaiveDate::from_ymd_opt(2023, 1, 12).unwrap()
+    );
+    assert_eq!(
+        record.record_date,
+        Some(NaiveDate::from_ymd_opt(2023, 1, 11).unwrap())
+    );
     assert_eq!(record.interest, 3.17);
     assert_eq!(record.stock_bonus, 0.0);
     assert_eq!(record.stock_gift, 0.0);
@@ -258,9 +305,17 @@ fn test_parse_dividend_value_bonus_gift_and_rights_issue() {
         "2087c6faff7f000000e4f9da630100009a9999999999b93f0000000000000000000000000000e03f0000000000000000000000000000000000000000000000000000000000000000b56b425a6350f83f7fee33010000000080ee330100000000",
     )
     .unwrap();
-    let bonus_record = DividendDb::parse_value(&bonus_raw).expect("should parse").expect("record");
-    assert_eq!(bonus_record.ex_dividend_date, NaiveDate::from_ymd_opt(2018, 6, 8).unwrap());
-    assert_eq!(bonus_record.record_date, Some(NaiveDate::from_ymd_opt(2018, 6, 7).unwrap()));
+    let bonus_record = DividendDb::parse_value(&bonus_raw)
+        .expect("should parse")
+        .expect("record");
+    assert_eq!(
+        bonus_record.ex_dividend_date,
+        NaiveDate::from_ymd_opt(2018, 6, 8).unwrap()
+    );
+    assert_eq!(
+        bonus_record.record_date,
+        Some(NaiveDate::from_ymd_opt(2018, 6, 7).unwrap())
+    );
     assert_eq!(bonus_record.interest, 0.1);
     assert_eq!(bonus_record.stock_bonus, 0.0);
     assert_eq!(bonus_record.stock_gift, 0.5);
@@ -273,9 +328,17 @@ fn test_parse_dividend_value_bonus_gift_and_rights_issue() {
         "2087c6faff7f00000040675d27010000000000000000000000000000000000000000000000000000a4703d0ad7a3c03f3333333333b3214000000000000000000000000000000000ae9b525e2be1f03fd0b43201000000000000000000000000",
     )
     .unwrap();
-    let rights_record = DividendDb::parse_value(&rights_raw).expect("should parse").expect("record");
-    assert_eq!(rights_record.ex_dividend_date, NaiveDate::from_ymd_opt(2010, 3, 15).unwrap());
-    assert_eq!(rights_record.record_date, Some(NaiveDate::from_ymd_opt(2010, 3, 4).unwrap()));
+    let rights_record = DividendDb::parse_value(&rights_raw)
+        .expect("should parse")
+        .expect("record");
+    assert_eq!(
+        rights_record.ex_dividend_date,
+        NaiveDate::from_ymd_opt(2010, 3, 15).unwrap()
+    );
+    assert_eq!(
+        rights_record.record_date,
+        Some(NaiveDate::from_ymd_opt(2010, 3, 4).unwrap())
+    );
     assert_eq!(rights_record.interest, 0.0);
     assert_eq!(rights_record.stock_bonus, 0.0);
     assert_eq!(rights_record.stock_gift, 0.0);
@@ -292,9 +355,17 @@ fn test_parse_dividend_value_gugai_slot() {
     )
     .unwrap();
 
-    let record = DividendDb::parse_value(&raw).expect("should parse").expect("record");
-    assert_eq!(record.ex_dividend_date, NaiveDate::from_ymd_opt(2025, 1, 12).unwrap());
-    assert_eq!(record.record_date, Some(NaiveDate::from_ymd_opt(2025, 1, 10).unwrap()));
+    let record = DividendDb::parse_value(&raw)
+        .expect("should parse")
+        .expect("record");
+    assert_eq!(
+        record.ex_dividend_date,
+        NaiveDate::from_ymd_opt(2025, 1, 12).unwrap()
+    );
+    assert_eq!(
+        record.record_date,
+        Some(NaiveDate::from_ymd_opt(2025, 1, 10).unwrap())
+    );
     assert_eq!(record.interest, 3.17);
     assert_eq!(record.stock_bonus, 0.0);
     assert_eq!(record.stock_gift, 0.0);

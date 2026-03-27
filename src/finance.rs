@@ -1,4 +1,8 @@
-//! QMT 本地财务 .DAT 解析（逆向工程版本，字段可能不完全）
+//! QMT 本地财务 `.DAT` 解析。
+//!
+//! 这里的字段命名来自仓库内样本和逆向结果，部分列仍保留“尽量稳定但未完全确认”
+//! 的语义。对需要结构化列名的场景，优先使用 [`FinanceRecord::column_names`] 和
+//! [`FinanceRecord::named_values`]，不要自行硬编码列顺序。
 
 use std::fs::File;
 use std::io;
@@ -9,12 +13,12 @@ use chrono::{DateTime, FixedOffset, TimeZone};
 use memmap2::MmapOptions;
 use thiserror::Error;
 
-const STRIDE_BALANCE: usize = 1264;  // 7001
-const STRIDE_INCOME: usize = 664;    // 7002
-const STRIDE_CASHFLOW: usize = 920;  // 7003
-const STRIDE_RATIOS: usize = 344;  // 7008
-const STRIDE_CAPITAL: usize = 56;  // 7004
-const STRIDE_HOLDER: usize = 64;   // 7005
+const STRIDE_BALANCE: usize = 1264; // 7001
+const STRIDE_INCOME: usize = 664; // 7002
+const STRIDE_CASHFLOW: usize = 920; // 7003
+const STRIDE_RATIOS: usize = 344; // 7008
+const STRIDE_CAPITAL: usize = 56; // 7004
+const STRIDE_HOLDER: usize = 64; // 7005
 const STRIDE_TOP_HOLDER: usize = 416; // 7006, 7007
 const COLUMNS_BALANCE: usize = 156;
 const COLUMNS_INCOME: usize = 80;
@@ -27,86 +31,129 @@ const MAX_VALID_TS: i64 = 2_524_608_000_000;
 const QMT_NAN_HEX: u64 = 0x7FEFFFFFFFFFFFFF;
 
 // --- 错误定义 ---
-/// 财务解析错误
+/// 财务解析错误。
 #[derive(Debug, Error)]
 pub enum FinanceError {
+    /// 文件读取失败。
     #[error("IO Error: {0}")]
     Io(#[from] io::Error),
+    /// 文件扩展名不是 `.dat` 或 `.DAT`。
     #[error("Invalid File Extension: {0}")]
     InvalidExtension(String),
+    /// 文件名中的 type id 不是当前支持的财务类型。
     #[error("Unsupported File Type ID: {0}")]
     UnsupportedType(u16),
+    /// 解析过程中发现记录布局或字段值异常。
     #[error("Parse Error: {0}")]
     Parse(String),
 }
 
-/// 北京时间类型 (UTC+8)
+/// 北京时间类型（UTC+8）。
 pub type BjDateTime = DateTime<FixedOffset>;
 
-/// 一条财务记录，包含报告/公告时间与具体数据枚举
+/// 一条财务记录。
+///
+/// 每条记录都包含财务文件类型、报告日期、公告日期，以及对应的 typed 数据载荷。
 #[derive(Debug, Clone)]
 pub struct FinanceRecord {
+    /// 当前记录对应的财务文件类型。
     pub file_type: FileType,
+    /// 报告期日期。
     pub report_date: BjDateTime,
+    /// 公告日期。
     pub announce_date: BjDateTime,
+    /// 具体数据载荷。
     pub data: FinanceData,
 }
 
-/// 不同类型的财务数据载荷
+/// 不同类型的财务数据载荷。
 #[derive(Debug, Clone)]
 pub enum FinanceData {
-    /// 7001, 7002, 7003: 财务报表 (80个指标)
-    Report { columns: Vec<f64> },
-    /// 7004: 股本结构
+    /// 7001、7002、7003 财务报表数值列。
+    Report {
+        /// 按文件类型对应 schema 排列的数值列。
+        columns: Vec<f64>,
+    },
+    /// 7004 股本结构。
     Capital {
+        /// 总股本。
         total_share: f64,
+        /// 流通股本。
         flow_share: f64,
+        /// 限售股本。
         restricted: f64,
+        /// 自由流通股本。
         free_float_share: f64,
     },
-    /// 7005: 股东人数
+    /// 7005 股东人数。
     HolderCount {
+        /// 股东总数。
         total_holders: i64,
+        /// A 股股东数。
         a_holders: i64,
+        /// B 股股东数。
         b_holders: i64,
+        /// H 股股东数。
         h_holders: i64,
+        /// 流通股股东数。
         float_holders: i64,
+        /// 其他股东数。
         other_holders: i64,
     },
-    /// 7006, 7007: 十大(流通)股东
+    /// 7006、7007 十大股东或十大流通股东。
     TopHolder {
+        /// 记录中的股东列表。
         holders: Vec<Shareholder>,
     },
-    /// 7008: 财务比率 (41个指标)
-    Ratios { ratios: Vec<f64> },
+    /// 7008 财务比率数值列。
+    Ratios {
+        /// 按比率表 schema 排列的数值列。
+        ratios: Vec<f64>,
+    },
 }
 
-/// 股东信息（变长文件启发式解析）
+/// 单个股东条目。
 #[derive(Debug, Clone)]
 pub struct Shareholder {
+    /// 股东名称。
     pub name: String,
+    /// 股东类型。
     pub holder_type: String,
+    /// 持股数量。
     pub hold_amount: f64,
+    /// 变动原因。
     pub change_reason: String,
-    pub hold_ratio: f64, // 比例 (如 0.05 代表 5%)
-    pub share_type: String, // 股份性质 (e.g. "流通A股")
+    /// 持股比例，如 `0.05` 代表 `5%`。
+    pub hold_ratio: f64,
+    /// 股份性质，例如“流通A股”。
+    pub share_type: String,
+    /// 股东排名。
     pub rank: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq)]
-/// 财务文件类型枚举 (7001-7008)
+/// 财务文件类型枚举。
 pub enum FileType {
+    /// 7001 资产负债表。
     BalanceSheet = 7001,
+    /// 7002 利润表。
     Income = 7002,
+    /// 7003 现金流量表。
     CashFlow = 7003,
+    /// 7004 股本结构。
     Capital = 7004,
+    /// 7005 股东人数。
     HolderCount = 7005,
+    /// 7006 十大流通股东。
     TopFlowHolder = 7006,
+    /// 7007 十大股东。
     TopHolder = 7007,
+    /// 7008 财务比率。
     Ratios = 7008,
 }
 
 impl FileType {
+    /// 从文件名中的 type id 映射为 [`FileType`]。
     pub fn from_id(id: u16) -> Option<Self> {
         match id {
             7001 => Some(Self::BalanceSheet),
@@ -523,78 +570,37 @@ const RATIO_COLUMN_NAMES: [&str; 41] = [
 ];
 
 impl FinanceRecord {
+    /// 返回当前记录对应的结构化列名。
+    ///
+    /// 仅对 `Report` 和 `Ratios` 类型返回值。
     pub fn column_names(&self) -> Option<&'static [&'static str]> {
         FinanceReader::column_names(self.file_type)
     }
 
+    /// 返回 `(列名, 数值)` 形式的配对结果。
+    ///
+    /// 仅对 `Report` 和 `Ratios` 类型返回值。
     pub fn named_values(&self) -> Option<Vec<(&'static str, f64)>> {
         let names = self.column_names()?;
         match &self.data {
-            FinanceData::Report { columns } => Some(
-                names
-                    .iter()
-                    .copied()
-                    .zip(columns.iter().copied())
-                    .collect(),
-            ),
-            FinanceData::Ratios { ratios } => Some(
-                names
-                    .iter()
-                    .copied()
-                    .zip(ratios.iter().copied())
-                    .collect(),
-            ),
-            _ => None,
-        }
-    }
-}
-
-impl FinanceData {
-    #[deprecated(note = "Use FinanceRecord::named_values() so the schema is self-describing.")]
-    pub fn named_values(&self, file_type: FileType) -> Option<Vec<(&'static str, f64)>> {
-        match self {
             FinanceData::Report { columns } => {
-                let expected_len = match file_type {
-                    FileType::BalanceSheet => COLUMNS_BALANCE,
-                    FileType::Income => COLUMNS_INCOME,
-                    FileType::CashFlow => COLUMNS_CASHFLOW,
-                    _ => return None,
-                };
-                if columns.len() != expected_len {
-                    return None;
-                }
-                let names = FinanceReader::column_names(file_type)?;
-                Some(
-                    names
-                        .iter()
-                        .copied()
-                        .zip(columns.iter().copied())
-                        .collect(),
-                )
+                Some(names.iter().copied().zip(columns.iter().copied()).collect())
             }
             FinanceData::Ratios { ratios } => {
-                if file_type != FileType::Ratios || ratios.len() != COLUMNS_RATIOS {
-                    return None;
-                }
-                let names = FinanceReader::column_names(FileType::Ratios)?;
-                Some(
-                    names
-                        .iter()
-                        .copied()
-                        .zip(ratios.iter().copied())
-                        .collect(),
-                )
+                Some(names.iter().copied().zip(ratios.iter().copied()).collect())
             }
             _ => None,
         }
     }
 }
 
-
-/// 财务文件读取器
+/// 财务文件读取器。
 pub struct FinanceReader;
 
 impl FinanceReader {
+    /// 返回指定财务文件类型的结构化列名。
+    ///
+    /// 当前仅对报表类和比率类文件返回值。
     pub fn column_names(file_type: FileType) -> Option<&'static [&'static str]> {
         match file_type {
             FileType::BalanceSheet => Some(&BALANCE_COLUMN_NAMES),
@@ -605,7 +611,21 @@ impl FinanceReader {
         }
     }
 
-    /// 读取文件并解析为 Struct 列表
+    /// 读取单个财务文件并解析为 [`FinanceRecord`] 列表。
+    ///
+    /// 文件类型会从文件名中的 type id 自动识别，例如 `002419_7001.DAT`。
+    ///
+    /// # Examples
+    ///
+    /// ```no_run
+    /// use qmt_parser::finance::FinanceReader;
+    ///
+    /// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+    /// let records = FinanceReader::read_file("finance/002419_7001.DAT")?;
+    /// println!("records = {}", records.len());
+    /// # Ok(())
+    /// # }
+    /// ```
     pub fn read_file(path: impl AsRef<Path>) -> Result<Vec<FinanceRecord>, FinanceError> {
         let path = path.as_ref();
         Self::validate_dat_path(path)?;
@@ -617,42 +637,34 @@ impl FinanceReader {
         let data = &mmap[..];
 
         match file_type {
-            FileType::BalanceSheet => {
-                Self::parse_fixed(data, STRIDE_BALANCE, 0, |body| {
-                    let mut cols = Vec::with_capacity(COLUMNS_BALANCE);
-                    for i in 0..COLUMNS_BALANCE {
-                        cols.push(Self::read_f64(body, i * 8).unwrap_or(f64::NAN));
-                    }
-                    FinanceData::Report { columns: cols }
-                })
-            }
-            FileType::Income => {
-                Self::parse_fixed(data, STRIDE_INCOME, 8, |body| {
-                    let mut cols = Vec::with_capacity(COLUMNS_INCOME);
-                    for i in 0..COLUMNS_INCOME {
-                        cols.push(Self::read_f64(body, i * 8).unwrap_or(f64::NAN));
-                    }
-                    FinanceData::Report { columns: cols }
-                })
-            }
-            FileType::CashFlow => {
-                Self::parse_fixed(data, STRIDE_CASHFLOW, 8, |body| {
-                    let mut cols = Vec::with_capacity(COLUMNS_CASHFLOW);
-                    for i in 0..COLUMNS_CASHFLOW {
-                        cols.push(Self::read_f64(body, i * 8).unwrap_or(f64::NAN));
-                    }
-                    FinanceData::Report { columns: cols }
-                })
-            }
-            FileType::Ratios => {
-                Self::parse_fixed(data, STRIDE_RATIOS, 0, |body| {
-                    let mut cols = Vec::with_capacity(COLUMNS_RATIOS);
-                    for i in 0..COLUMNS_RATIOS {
-                        cols.push(Self::read_f64(body, i * 8).unwrap_or(f64::NAN));
-                    }
-                    FinanceData::Ratios { ratios: cols }
-                })
-            }
+            FileType::BalanceSheet => Self::parse_fixed(data, STRIDE_BALANCE, 0, |body| {
+                let mut cols = Vec::with_capacity(COLUMNS_BALANCE);
+                for i in 0..COLUMNS_BALANCE {
+                    cols.push(Self::read_f64(body, i * 8).unwrap_or(f64::NAN));
+                }
+                FinanceData::Report { columns: cols }
+            }),
+            FileType::Income => Self::parse_fixed(data, STRIDE_INCOME, 8, |body| {
+                let mut cols = Vec::with_capacity(COLUMNS_INCOME);
+                for i in 0..COLUMNS_INCOME {
+                    cols.push(Self::read_f64(body, i * 8).unwrap_or(f64::NAN));
+                }
+                FinanceData::Report { columns: cols }
+            }),
+            FileType::CashFlow => Self::parse_fixed(data, STRIDE_CASHFLOW, 8, |body| {
+                let mut cols = Vec::with_capacity(COLUMNS_CASHFLOW);
+                for i in 0..COLUMNS_CASHFLOW {
+                    cols.push(Self::read_f64(body, i * 8).unwrap_or(f64::NAN));
+                }
+                FinanceData::Report { columns: cols }
+            }),
+            FileType::Ratios => Self::parse_fixed(data, STRIDE_RATIOS, 0, |body| {
+                let mut cols = Vec::with_capacity(COLUMNS_RATIOS);
+                for i in 0..COLUMNS_RATIOS {
+                    cols.push(Self::read_f64(body, i * 8).unwrap_or(f64::NAN));
+                }
+                FinanceData::Ratios { ratios: cols }
+            }),
             FileType::Capital => {
                 Self::parse_fixed(data, STRIDE_CAPITAL, 0, |body| {
                     // Body Offset (Header=16): 0=Total, 8=Flow, 16=Restricted, 24=FreeFloat
@@ -682,7 +694,9 @@ impl FinanceReader {
     fn detect_type(path: &Path) -> Result<FileType, FinanceError> {
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
         let id_part = stem.split('_').last().unwrap_or("");
-        let id = id_part.parse::<u16>().map_err(|_| FinanceError::Parse("Invalid Filename".into()))?;
+        let id = id_part
+            .parse::<u16>()
+            .map_err(|_| FinanceError::Parse("Invalid Filename".into()))?;
         FileType::from_id(id).ok_or(FinanceError::UnsupportedType(id))
     }
 
@@ -706,7 +720,9 @@ impl FinanceReader {
         header_offset: usize,
         parser: F,
     ) -> Result<Vec<FinanceRecord>, FinanceError>
-    where F: Fn(&[u8]) -> FinanceData {
+    where
+        F: Fn(&[u8]) -> FinanceData,
+    {
         let mut results = Vec::new();
         let mut cursor = 0;
         let len = data.len();
@@ -714,8 +730,8 @@ impl FinanceReader {
         while cursor + header_offset + 16 <= len {
             // 扫描 Header
             let header_start = cursor + header_offset;
-            let ts1 = LittleEndian::read_i64(&data[header_start..header_start+8]);
-            let ts2 = LittleEndian::read_i64(&data[header_start+8..header_start+16]);
+            let ts1 = LittleEndian::read_i64(&data[header_start..header_start + 8]);
+            let ts2 = LittleEndian::read_i64(&data[header_start + 8..header_start + 16]);
 
             // 7001-7004, 7008 顺序: Report, Announce
             if Self::is_valid_ts(ts1) {
@@ -729,12 +745,12 @@ impl FinanceReader {
                         report_date // Fallback
                     };
 
-                    let body = &data[header_start+16..cursor+stride];
+                    let body = &data[header_start + 16..cursor + stride];
                     results.push(FinanceRecord {
                         file_type: Self::file_type_from_stride(stride)?,
                         report_date,
                         announce_date,
-                        data: parser(body)
+                        data: parser(body),
                     });
 
                     cursor += stride;
@@ -755,16 +771,20 @@ impl FinanceReader {
         let stride = STRIDE_HOLDER;
 
         while cursor + 16 <= data.len() {
-            let ts1 = LittleEndian::read_i64(&data[cursor..cursor+8]); // Announce
-            let ts2 = LittleEndian::read_i64(&data[cursor+8..cursor+16]); // Report
+            let ts1 = LittleEndian::read_i64(&data[cursor..cursor + 8]); // Announce
+            let ts2 = LittleEndian::read_i64(&data[cursor + 8..cursor + 16]); // Report
 
             // 只要有一个有效，就尝试解析
             if Self::is_valid_ts(ts2) {
                 if cursor + stride <= data.len() {
                     let report_date = Self::ts_to_bj(ts2);
-                    let announce_date = if Self::is_valid_ts(ts1) { Self::ts_to_bj(ts1) } else { report_date };
+                    let announce_date = if Self::is_valid_ts(ts1) {
+                        Self::ts_to_bj(ts1)
+                    } else {
+                        report_date
+                    };
 
-                    let body = &data[cursor+16..cursor+stride];
+                    let body = &data[cursor + 16..cursor + stride];
                     let total_holders = Self::read_f64(body, 0).unwrap_or(0.0) as i64;
                     let a_holders = Self::read_f64(body, 8).unwrap_or(0.0) as i64;
                     let b_holders = Self::read_f64(body, 16).unwrap_or(0.0) as i64;
@@ -783,7 +803,7 @@ impl FinanceReader {
                             h_holders,
                             float_holders,
                             other_holders,
-                        }
+                        },
                     });
                     cursor += stride;
                     continue;
@@ -795,7 +815,10 @@ impl FinanceReader {
     }
 
     /// 解析 7006/7007 十大(流通)股东定长记录，并按同一报告期聚合。
-    fn parse_top_holders(data: &[u8], file_type: FileType) -> Result<Vec<FinanceRecord>, FinanceError> {
+    fn parse_top_holders(
+        data: &[u8],
+        file_type: FileType,
+    ) -> Result<Vec<FinanceRecord>, FinanceError> {
         let mut results = Vec::new();
         let mut current_report_ts = 0i64;
         let mut current_announce_ts = 0i64;
@@ -864,7 +887,10 @@ impl FinanceReader {
             STRIDE_RATIOS => Ok(FileType::Ratios),
             STRIDE_CAPITAL => Ok(FileType::Capital),
             STRIDE_HOLDER => Ok(FileType::HolderCount),
-            _ => Err(FinanceError::Parse(format!("Unknown finance stride: {}", stride))),
+            _ => Err(FinanceError::Parse(format!(
+                "Unknown finance stride: {}",
+                stride
+            ))),
         }
     }
 
@@ -878,30 +904,38 @@ impl FinanceReader {
         let tz = FixedOffset::east_opt(8 * 3600).unwrap();
         let secs = ts / 1000;
         let nsecs = (ts % 1000) * 1_000_000;
-        tz.timestamp_opt(secs, nsecs as u32).single().unwrap_or_default()
+        tz.timestamp_opt(secs, nsecs as u32)
+            .single()
+            .unwrap_or_default()
     }
 
     /// 读取 f64 并处理哨兵值
     fn read_f64(data: &[u8], offset: usize) -> Option<f64> {
-        if offset + 8 > data.len() { return None; }
-        let u = LittleEndian::read_u64(&data[offset..offset+8]);
-        if u == QMT_NAN_HEX { return None; }
+        if offset + 8 > data.len() {
+            return None;
+        }
+        let u = LittleEndian::read_u64(&data[offset..offset + 8]);
+        if u == QMT_NAN_HEX {
+            return None;
+        }
         let f = f64::from_bits(u);
         if f.is_nan() { None } else { Some(f) }
     }
 
     /// 从定长缓冲区读取 UTF-8 字符串
     fn read_string(data: &[u8], offset: usize, max_len: usize) -> String {
-        if offset >= data.len() { return String::new(); }
+        if offset >= data.len() {
+            return String::new();
+        }
         let end = (offset + max_len).min(data.len());
         let slice = &data[offset..end];
         // 找 \0 结尾
         let actual_len = slice.iter().position(|&c| c == 0).unwrap_or(slice.len());
-        String::from_utf8_lossy(&slice[..actual_len]).trim().to_string()
+        String::from_utf8_lossy(&slice[..actual_len])
+            .trim()
+            .to_string()
     }
-
 }
-
 
 #[cfg(test)]
 mod tests {
@@ -914,12 +948,17 @@ mod tests {
 
     // 辅助函数：打印前5条
     fn print_head(type_id: u16, records: &[FinanceRecord]) {
-        println!("\n>>> [Type {}] Found {} records. Showing first 5:", type_id, records.len());
+        println!(
+            "\n>>> [Type {}] Found {} records. Showing first 5:",
+            type_id,
+            records.len()
+        );
         for (i, rec) in records.iter().take(5).enumerate() {
-            println!("#{:03} | Report: {} | Announce: {}",
-                     i,
-                     rec.report_date.format("%Y-%m-%d"),
-                     rec.announce_date.format("%Y-%m-%d")
+            println!(
+                "#{:03} | Report: {} | Announce: {}",
+                i,
+                rec.report_date.format("%Y-%m-%d"),
+                rec.announce_date.format("%Y-%m-%d")
             );
             // 打印具体的 Data 枚举内容，使用 {:#?} 美化输出
             println!("Data: {:#?}\n", rec.data);
@@ -927,14 +966,20 @@ mod tests {
         if records.is_empty() {
             println!("(No records found)\n");
         } else {
-            println!("... (remaining {} records omitted)\n", records.len().saturating_sub(5));
+            println!(
+                "... (remaining {} records omitted)\n",
+                records.len().saturating_sub(5)
+            );
         }
     }
 
     #[test]
     fn test_7001_balance_sheet() {
         let path = get_fixture("002419_7001.DAT");
-        if !path.exists() { eprintln!("Skipping 7001: File not found"); return; }
+        if !path.exists() {
+            eprintln!("Skipping 7001: File not found");
+            return;
+        }
 
         let res = FinanceReader::read_file(&path).expect("Failed to parse 7001");
         assert!(!res.is_empty(), "7001 should not be empty");
@@ -953,7 +998,10 @@ mod tests {
     #[test]
     fn test_7002_income() {
         let path = get_fixture("002419_7002.DAT");
-        if !path.exists() { eprintln!("Skipping 7002: File not found"); return; }
+        if !path.exists() {
+            eprintln!("Skipping 7002: File not found");
+            return;
+        }
 
         let res = FinanceReader::read_file(&path).expect("Failed to parse 7002");
         assert!(!res.is_empty(), "7002 should not be empty");
@@ -972,7 +1020,10 @@ mod tests {
     #[test]
     fn test_7003_cashflow() {
         let path = get_fixture("002419_7003.DAT");
-        if !path.exists() { eprintln!("Skipping 7003: File not found"); return; }
+        if !path.exists() {
+            eprintln!("Skipping 7003: File not found");
+            return;
+        }
 
         let res = FinanceReader::read_file(&path).expect("Failed to parse 7003");
         assert!(!res.is_empty(), "7003 should not be empty");
@@ -991,7 +1042,10 @@ mod tests {
     #[test]
     fn test_7004_capital() {
         let path = get_fixture("002419_7004.DAT");
-        if !path.exists() { eprintln!("Skipping 7004: File not found"); return; }
+        if !path.exists() {
+            eprintln!("Skipping 7004: File not found");
+            return;
+        }
 
         let res = FinanceReader::read_file(&path).expect("Failed to parse 7004");
         assert!(!res.is_empty(), "7004 should not be empty");
@@ -1001,7 +1055,8 @@ mod tests {
             flow_share,
             restricted,
             free_float_share,
-        } = &res[0].data {
+        } = &res[0].data
+        {
             assert_eq!(*total_share, 400_100_000.0);
             assert_eq!(*flow_share, 40_080_000.0);
             assert_eq!(*restricted, 0.0);
@@ -1016,7 +1071,10 @@ mod tests {
     #[test]
     fn test_7005_holder_count() {
         let path = get_fixture("002419_7005.DAT");
-        if !path.exists() { eprintln!("Skipping 7005: File not found"); return; }
+        if !path.exists() {
+            eprintln!("Skipping 7005: File not found");
+            return;
+        }
 
         let res = FinanceReader::read_file(&path).expect("Failed to parse 7005");
         assert!(!res.is_empty(), "7005 should not be empty");
@@ -1028,7 +1086,8 @@ mod tests {
             h_holders,
             float_holders,
             other_holders,
-        } = &res[0].data {
+        } = &res[0].data
+        {
             assert_eq!(*total_holders, 35_719);
             assert_eq!(*a_holders, 35_719);
             assert_eq!(*b_holders, 0);
@@ -1045,7 +1104,10 @@ mod tests {
     #[test]
     fn test_7006_top_float_holder() {
         let path = get_fixture("002419_7006.DAT");
-        if !path.exists() { eprintln!("Skipping 7006: File not found"); return; }
+        if !path.exists() {
+            eprintln!("Skipping 7006: File not found");
+            return;
+        }
 
         let res = FinanceReader::read_file(&path).expect("Failed to parse 7006");
         assert!(!res.is_empty(), "7006 should not be empty");
@@ -1069,7 +1131,10 @@ mod tests {
     #[test]
     fn test_7007_top_holder() {
         let path = get_fixture("002419_7007.DAT");
-        if !path.exists() { eprintln!("Skipping 7007: File not found"); return; }
+        if !path.exists() {
+            eprintln!("Skipping 7007: File not found");
+            return;
+        }
 
         let res = FinanceReader::read_file(&path).expect("Failed to parse 7007");
         assert!(!res.is_empty(), "7007 should not be empty");
@@ -1093,7 +1158,10 @@ mod tests {
     #[test]
     fn test_7008_ratios() {
         let path = get_fixture("002419_7008.DAT");
-        if !path.exists() { eprintln!("Skipping 7008: File not found"); return; }
+        if !path.exists() {
+            eprintln!("Skipping 7008: File not found");
+            return;
+        }
 
         let res = FinanceReader::read_file(&path).expect("Failed to parse 7008");
         assert!(!res.is_empty(), "7008 should not be empty");
@@ -1141,7 +1209,10 @@ mod tests {
     #[test]
     fn test_named_values_for_ratios() {
         let path = get_fixture("002419_7008.DAT");
-        if !path.exists() { eprintln!("Skipping 7008: File not found"); return; }
+        if !path.exists() {
+            eprintln!("Skipping 7008: File not found");
+            return;
+        }
 
         let res = FinanceReader::read_file(&path).expect("Failed to parse 7008");
         let named = res[0].named_values().expect("named ratios");
@@ -1155,7 +1226,10 @@ mod tests {
     #[test]
     fn test_finance_record_is_self_describing() {
         let path = get_fixture("002419_7001.DAT");
-        if !path.exists() { eprintln!("Skipping 7001: File not found"); return; }
+        if !path.exists() {
+            eprintln!("Skipping 7001: File not found");
+            return;
+        }
 
         let res = FinanceReader::read_file(&path).expect("Failed to parse 7001");
         let first = &res[0];

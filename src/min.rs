@@ -1,3 +1,10 @@
+//! 1 分钟 K 线解析。
+//!
+//! 这个模块提供两层对外接口：
+//!
+//! - [`MinReader`]：按记录流式迭代读取
+//! - [`parse_min_to_structs`] / [`parse_min_to_dataframe`]：一次性读完整个文件
+
 use std::fs::File;
 use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
@@ -12,6 +19,7 @@ use polars::prelude::*;
 const RECORD_SIZE: usize = 64;
 const PRICE_SCALE: f64 = 1000.0;
 
+/// 分钟线 `DataFrame` 输出列名。
 pub const MIN_DATAFRAME_COLUMN_NAMES: [&str; 11] = [
     "time",
     "open",
@@ -26,31 +34,42 @@ pub const MIN_DATAFRAME_COLUMN_NAMES: [&str; 11] = [
     "suspendFlag",
 ];
 
+/// 返回当前分钟线 `DataFrame` 输出列名。
 pub fn min_dataframe_column_names() -> &'static [&'static str] {
     &MIN_DATAFRAME_COLUMN_NAMES
 }
 
-/// Level 1: 1分钟线结构体
+/// 单条 1 分钟 K 线记录。
 #[derive(Debug, Clone)]
 pub struct MinKlineData {
+    /// 北京时间毫秒时间戳。
     pub timestamp_ms: i64,
+    /// 开盘价。
     pub open: f64,
+    /// 最高价。
     pub high: f64,
+    /// 最低价。
     pub low: f64,
+    /// 收盘价。
     pub close: f64,
+    /// 成交量。
     pub volume: u32,
+    /// 成交额。
     pub amount: f64,
+    /// 持仓量。
     pub open_interest: u32,
+    /// 文件中记录的昨收价。
     pub pre_close: f64,
 }
 
-/// Level 2: Reader 迭代器
+/// 流式读取分钟线文件的迭代器。
 pub struct MinReader<R: Read> {
     reader: BufReader<R>,
     buffer: [u8; RECORD_SIZE],
 }
 
 impl MinReader<File> {
+    /// 从 `.dat` 文件路径创建分钟线读取器。
     pub fn from_path(path: impl AsRef<Path>) -> Result<Self, MinParseError> {
         let path = path.as_ref();
         validate_dat_path(path)?;
@@ -60,6 +79,7 @@ impl MinReader<File> {
 }
 
 impl<R: Read> MinReader<R> {
+    /// 从任意 `Read` 实例构造分钟线读取器。
     pub fn new(reader: R) -> Self {
         MinReader {
             reader: BufReader::new(reader),
@@ -84,7 +104,21 @@ impl<R: Read> Iterator for MinReader<R> {
     }
 }
 
-/// Level 3 API: Vec<Struct>
+/// 把分钟线文件完整解析为 `Vec<MinKlineData>`。
+///
+/// 适合应用层直接消费 typed 结构体。
+///
+/// # Examples
+///
+/// ```no_run
+/// use qmt_parser::parse_min_to_structs;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let rows = parse_min_to_structs("data/000001-1m.dat")?;
+/// println!("rows = {}", rows.len());
+/// # Ok(())
+/// # }
+/// ```
 pub fn parse_min_to_structs(path: impl AsRef<Path>) -> Result<Vec<MinKlineData>, MinParseError> {
     let path_ref = path.as_ref();
     let mut reader = MinReader::from_path(path_ref)?;
@@ -96,7 +130,25 @@ pub fn parse_min_to_structs(path: impl AsRef<Path>) -> Result<Vec<MinKlineData>,
     Ok(out)
 }
 
-/// Level 3 API: DataFrame
+/// 把分钟线文件完整解析为 Polars `DataFrame`。
+///
+/// 输出 schema 可通过 [`min_dataframe_column_names`] 获取。
+///
+/// # Examples
+///
+/// ```no_run
+/// # #[cfg(feature = "polars")]
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use qmt_parser::parse_min_to_dataframe;
+///
+/// let df = parse_min_to_dataframe("data/000001-1m.dat")?;
+/// println!("{:?}", df.shape());
+/// # Ok(())
+/// # }
+/// #
+/// # #[cfg(not(feature = "polars"))]
+/// # fn main() {}
+/// ```
 #[cfg(feature = "polars")]
 pub fn parse_min_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame, MinParseError> {
     let path_ref = path.as_ref();
@@ -229,26 +281,23 @@ fn parse_record(cursor: &mut Cursor<&[u8]>) -> std::io::Result<MinKlineData> {
     })
 }
 
-/// 向后兼容旧命名
-#[cfg(feature = "polars")]
-pub fn parse_kline_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame, MinParseError> {
-    parse_min_to_dataframe(path)
-}
-
 #[cfg(all(test, feature = "polars"))]
 mod tests {
     use super::*;
     use std::path::PathBuf;
 
     #[test]
-    fn test_parse_kline_dataframe() -> Result<(), MinParseError> {
+    fn test_parse_min_dataframe() -> Result<(), MinParseError> {
         let test_file = PathBuf::from("data/000000-1m.dat");
 
         let df = parse_min_to_dataframe(&test_file)?;
 
         println!("--- Tail ---");
         println!("{}", df.tail(Some(5)));
-        assert_eq!(df.get_column_names_str().as_slice(), min_dataframe_column_names());
+        assert_eq!(
+            df.get_column_names_str().as_slice(),
+            min_dataframe_column_names()
+        );
         Ok(())
     }
 }

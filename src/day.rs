@@ -1,3 +1,11 @@
+//! 日线解析。
+//!
+//! 这个模块同时提供：
+//!
+//! - 原始日线记录读取
+//! - 按 `NaiveDate` 或字符串日期范围过滤
+//! - 在 `polars` feature 下生成带业务派生列的 `DataFrame`
+
 use std::fs::File;
 use std::io::{BufReader, Cursor, Read};
 use std::path::Path;
@@ -14,6 +22,7 @@ const RECORD_SIZE: usize = 64;
 const PRICE_SCALE: f64 = 1000.0;
 const AMOUNT_SCALE: f64 = 100.0;
 
+/// 日线 `DataFrame` 输出列名。
 pub const DAILY_DATAFRAME_COLUMN_NAMES: [&str; 11] = [
     "time",
     "open",
@@ -28,25 +37,38 @@ pub const DAILY_DATAFRAME_COLUMN_NAMES: [&str; 11] = [
     "suspendFlag",
 ];
 
+/// 返回当前日线 `DataFrame` 输出列名。
 pub fn daily_dataframe_column_names() -> &'static [&'static str] {
     &DAILY_DATAFRAME_COLUMN_NAMES
 }
 
-/// Level 1: 日线原始结构
+/// 单条日线原始记录。
 #[derive(Debug, Clone)]
 pub struct DailyKlineData {
+    /// 北京时间毫秒时间戳。
     pub timestamp_ms: i64,
+    /// 开盘价。
     pub open: f64,
+    /// 最高价。
     pub high: f64,
+    /// 最低价。
     pub low: f64,
+    /// 收盘价。
     pub close: f64,
+    /// 成交量。
     pub volume: u32,
+    /// 成交额，已按 QMT 日线比例缩放。
     pub amount: f64,
+    /// 持仓量。
     pub open_interest: u32,
+    /// 文件原始昨收价。
     pub file_pre_close: f64,
 }
 
-/// Level 2: 日线 Reader，仅做原始读取与日期过滤
+/// 流式读取日线文件的迭代器。
+///
+/// 这个 reader 只负责原始记录读取和日期过滤，不做 `preClose`、`suspendFlag`
+/// 等衍生逻辑。
 pub struct DailyReader<R: Read> {
     reader: BufReader<R>,
     buffer: [u8; RECORD_SIZE],
@@ -56,6 +78,7 @@ pub struct DailyReader<R: Read> {
 }
 
 impl DailyReader<File> {
+    /// 从 `.dat` 文件路径创建日线读取器。
     pub fn from_path(
         path: impl AsRef<Path>,
         start: Option<NaiveDate>,
@@ -69,6 +92,7 @@ impl DailyReader<File> {
 }
 
 impl<R: Read> DailyReader<R> {
+    /// 从任意 `Read` 实例构造日线读取器。
     pub fn new(reader: R, start: Option<NaiveDate>, end: Option<NaiveDate>) -> Self {
         DailyReader {
             reader: BufReader::new(reader),
@@ -95,28 +119,46 @@ impl<R: Read> Iterator for DailyReader<R> {
             let mut cursor = Cursor::new(&self.buffer[..]);
             match parse_record(&mut cursor, self.start, self.end, self.tz_offset) {
                 Ok(Some(record)) => return Some(Ok(record)),
-                Ok(None) => continue, // 过滤掉不在时间范围内的记录
+                Ok(None) => continue,
                 Err(e) => return Some(Err(e)),
             }
         }
     }
 }
 
-/// Level 3 API: Vec<Struct>
+/// 按字符串日期范围解析日线文件为结构体。
+///
+/// `start_date_str` 和 `end_date_str` 必须使用 `YYYYMMDD` 格式。
+///
+/// # Examples
+///
+/// ```no_run
+/// use qmt_parser::parse_daily_to_structs;
+///
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// let rows = parse_daily_to_structs("data/day/000001.dat", "20230101", "20231231")?;
+/// println!("rows = {}", rows.len());
+/// # Ok(())
+/// # }
+/// ```
 pub fn parse_daily_to_structs(
     path: impl AsRef<Path>,
     start_date_str: &str,
     end_date_str: &str,
 ) -> Result<Vec<DailyKlineData>, DailyParseError> {
-    let start = parse_date(start_date_str).map_err(|e| DailyParseError::InvalidStartDate(e))?;
-    let end = parse_date(end_date_str).map_err(|e| DailyParseError::InvalidEndDate(e))?;
+    let start = parse_date(start_date_str).map_err(DailyParseError::InvalidStartDate)?;
+    let end = parse_date(end_date_str).map_err(DailyParseError::InvalidEndDate)?;
     parse_daily_to_structs_in_range(path, Some(start), Some(end))
 }
 
-pub fn parse_daily_file_to_structs(path: impl AsRef<Path>) -> Result<Vec<DailyKlineData>, DailyParseError> {
+/// 解析整个日线文件为结构体，不做日期过滤。
+pub fn parse_daily_file_to_structs(
+    path: impl AsRef<Path>,
+) -> Result<Vec<DailyKlineData>, DailyParseError> {
     parse_daily_to_structs_in_range(path, None, None)
 }
 
+/// 按 typed 日期范围解析日线文件为结构体。
 pub fn parse_daily_to_structs_in_range(
     path: impl AsRef<Path>,
     start: Option<NaiveDate>,
@@ -131,23 +173,47 @@ pub fn parse_daily_to_structs_in_range(
     Ok(out)
 }
 
-/// Level 3 API: DataFrame（在 Lazy 端处理业务逻辑）
+/// 按字符串日期范围解析日线文件为 `DataFrame`。
+///
+/// `DataFrame` 输出会额外补齐：
+///
+/// - `suspendFlag`
+/// - `preClose`
+/// - `settlementPrice`
+///
+/// # Examples
+///
+/// ```no_run
+/// # #[cfg(feature = "polars")]
+/// # fn main() -> Result<(), Box<dyn std::error::Error>> {
+/// use qmt_parser::parse_daily_to_dataframe;
+///
+/// let df = parse_daily_to_dataframe("data/day/000001.dat", "20230101", "20231231")?;
+/// println!("{:?}", df.shape());
+/// # Ok(())
+/// # }
+/// #
+/// # #[cfg(not(feature = "polars"))]
+/// # fn main() {}
+/// ```
 #[cfg(feature = "polars")]
 pub fn parse_daily_to_dataframe(
     path: impl AsRef<Path>,
     start_date_str: &str,
     end_date_str: &str,
 ) -> Result<DataFrame, DailyParseError> {
-    let start = parse_date(start_date_str).map_err(|e| DailyParseError::InvalidStartDate(e))?;
-    let end = parse_date(end_date_str).map_err(|e| DailyParseError::InvalidEndDate(e))?;
+    let start = parse_date(start_date_str).map_err(DailyParseError::InvalidStartDate)?;
+    let end = parse_date(end_date_str).map_err(DailyParseError::InvalidEndDate)?;
     parse_daily_to_dataframe_in_range(path, Some(start), Some(end))
 }
 
+/// 解析整个日线文件为 `DataFrame`，不做日期过滤。
 #[cfg(feature = "polars")]
 pub fn parse_daily_file_to_dataframe(path: impl AsRef<Path>) -> Result<DataFrame, DailyParseError> {
     parse_daily_to_dataframe_in_range(path, None, None)
 }
 
+/// 按 typed 日期范围解析日线文件为 `DataFrame`。
 #[cfg(feature = "polars")]
 pub fn parse_daily_to_dataframe_in_range(
     path: impl AsRef<Path>,
@@ -250,7 +316,9 @@ fn validate_dat_path(path: &Path) -> Result<(), DailyParseError> {
         .unwrap_or_default()
         .to_ascii_lowercase();
     if ext != "dat" {
-        return Err(DailyParseError::InvalidExtension(path.display().to_string()));
+        return Err(DailyParseError::InvalidExtension(
+            path.display().to_string(),
+        ));
     }
     Ok(())
 }
@@ -318,16 +386,6 @@ fn parse_record(
     }))
 }
 
-/// 兼容旧命名
-#[cfg(feature = "polars")]
-pub fn parse_daily_kline(
-    path: impl AsRef<Path>,
-    start_date_str: &str,
-    end_date_str: &str,
-) -> Result<DataFrame, DailyParseError> {
-    parse_daily_to_dataframe(path, start_date_str, end_date_str)
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -336,7 +394,7 @@ mod tests {
 
     #[test]
     #[cfg(feature = "polars")]
-    fn test_parse_daily_kline() -> Result<(), DailyParseError> {
+    fn test_parse_daily_dataframe() -> Result<(), DailyParseError> {
         let daily_path = PathBuf::from("/mnt/data/trade/qmtdata/datadir/SZ/86400/000001.DAT");
 
         if !daily_path.exists() {
@@ -353,7 +411,10 @@ mod tests {
         println!("{}", df);
 
         if df.height() > 0 {
-            assert_eq!(df.get_column_names_str().as_slice(), daily_dataframe_column_names());
+            assert_eq!(
+                df.get_column_names_str().as_slice(),
+                daily_dataframe_column_names()
+            );
             let cols = df.get_column_names();
             assert!(cols.iter().any(|c| c.as_str() == "suspendFlag"));
             assert!(cols.iter().any(|c| c.as_str() == "preClose"));
@@ -368,7 +429,10 @@ mod tests {
                 let suspend_1 = s_suspend.i32()?.get(1).unwrap();
 
                 if suspend_1 == 0 {
-                    assert!((pre_1 - close_0).abs() < 0.001, "PreClose calculation logic error");
+                    assert!(
+                        (pre_1 - close_0).abs() < 0.001,
+                        "PreClose calculation logic error"
+                    );
                 }
             }
         }
