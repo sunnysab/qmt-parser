@@ -1,10 +1,23 @@
 [package]
 name = "qmt-parser"
 version = "0.1.0"
-edition.workspace = true
-authors.workspace = true
-license.workspace = true
-rust-version.workspace = true
+edition = "2024"
+authors = ["sunnysab <i@sunnysab.cn>"]
+license = "GPL-3.0-only"
+description = "Rust parser for MiniQMT/QMT local market data, finance files, and dividend metadata."
+readme = "README.md"
+repository = "https://github.com/sunnysab/qmt-parser"
+homepage = "https://github.com/sunnysab/qmt-parser"
+documentation = "https://docs.rs/qmt-parser"
+keywords = ["qmt", "quant", "parser", "market-data", "polars"]
+categories = ["parser-implementations", "encoding", "science"]
+rust-version = "1.90"
+include = [
+    "Cargo.toml",
+    "README.md",
+    "LICENSE",
+    "src/**/*.rs",
+]
 
 [features]
 default = ["polars"]
