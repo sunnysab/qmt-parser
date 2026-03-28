@@ -55,13 +55,13 @@ qmt-parser = { git = "https://github.com/sunnysab/qmt-parser" }
 ```rust
 use qmt_parser::parse_ticks_to_structs;
 
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-let ticks = parse_ticks_to_structs("data/000001-20250529-tick.dat")?;
-if let Some(first) = ticks.first() {
-    println!("{} {} {:?}", first.symbol, first.date, first.last_price);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let ticks = parse_ticks_to_structs("data/000001-20250529-tick.dat")?;
+    if let Some(first) = ticks.first() {
+        println!("{} {} {:?}", first.symbol, first.date, first.last_price);
+    }
+    Ok(())
 }
-# Ok(())
-# }
 ```
 
 ### 解析分钟线为 DataFrame
@@ -70,15 +70,15 @@ if let Some(first) = ticks.first() {
 #[cfg(feature = "polars")]
 use qmt_parser::parse_min_to_dataframe;
 
-# #[cfg(feature = "polars")]
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-let df = parse_min_to_dataframe("data/000001-1m.dat")?;
-println!("{:?}", df.shape());
-# Ok(())
-# }
-#
-# #[cfg(not(feature = "polars"))]
-# fn main() {}
+#[cfg(feature = "polars")]
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let df = parse_min_to_dataframe("data/000001-1m.dat")?;
+    println!("{:?}", df.shape());
+    Ok(())
+}
+
+#[cfg(not(feature = "polars"))]
+fn main() {}
 ```
 
 ### 解析日线并限制日期范围
@@ -86,11 +86,11 @@ println!("{:?}", df.shape());
 ```rust
 use qmt_parser::parse_daily_to_structs;
 
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-let rows = parse_daily_to_structs("data/day/000001.dat", "20230101", "20231231")?;
-println!("rows = {}", rows.len());
-# Ok(())
-# }
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let rows = parse_daily_to_structs("data/day/000001.dat", "20230101", "20231231")?;
+    println!("rows = {}", rows.len());
+    Ok(())
+}
 ```
 
 ### 读取财务文件
@@ -98,13 +98,13 @@ println!("rows = {}", rows.len());
 ```rust
 use qmt_parser::finance::FinanceReader;
 
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-let records = FinanceReader::read_file("finance/002419_7001.DAT")?;
-if let Some(first) = records.first() {
-    println!("{:?} {:?}", first.file_type, first.report_date);
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let records = FinanceReader::read_file("finance/002419_7001.DAT")?;
+    if let Some(first) = records.first() {
+        println!("{:?} {:?}", first.file_type, first.report_date);
+    }
+    Ok(())
 }
-# Ok(())
-# }
 ```
 
 ### 查询分红送配数据库
@@ -112,12 +112,12 @@ if let Some(first) = records.first() {
 ```rust
 use qmt_parser::dividend::DividendDb;
 
-# fn main() -> Result<(), Box<dyn std::error::Error>> {
-let mut db = DividendDb::new("/path/to/DividData")?;
-let records = db.query("SH", "600000")?;
-println!("records = {}", records.len());
-# Ok(())
-# }
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let mut db = DividendDb::new("/path/to/DividData")?;
+    let records = db.query("SH", "600000")?;
+    println!("records = {}", records.len());
+    Ok(())
+}
 ```
 
 ## API 结构
