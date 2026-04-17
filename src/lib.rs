@@ -96,8 +96,8 @@ pub use dividend::{DividendDb, DividendError, DividendRecord};
 pub use error::{DailyParseError, MetadataParseError, MinParseError, TickParseError};
 pub use finance::{FileType, FinanceData, FinanceError, FinanceReader, FinanceRecord, Shareholder};
 pub use metadata::{
-    parse_holiday_file, parse_industry_file, parse_sector_name_file, parse_sector_weight_members,
-    parse_sectorlist_dat,
+    parse_holiday_file, parse_industry_file, parse_sector_name_file, parse_sector_weight_index,
+    parse_sector_weight_members, parse_sectorlist_dat,
 };
 /// 分钟线 DataFrame 的输出列名。
 pub use min::min_dataframe_column_names;

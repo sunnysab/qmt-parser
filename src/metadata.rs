@@ -117,6 +117,44 @@ pub fn parse_sector_weight_members(
     Ok(out)
 }
 
+/// 解析 xtquant `sectorWeightData.txt`，返回指定 index/sector 的 `stock -> weight`。
+pub fn parse_sector_weight_index(
+    path: impl AsRef<Path>,
+    index_code: &str,
+) -> Result<BTreeMap<String, f64>, MetadataParseError> {
+    let text = fs::read_to_string(path)?;
+    let mut out = BTreeMap::new();
+
+    for line in text.lines() {
+        let line = line.trim();
+        if line.is_empty() {
+            continue;
+        }
+        let parts = line
+            .split(';')
+            .map(str::trim)
+            .filter(|part| !part.is_empty())
+            .collect::<Vec<_>>();
+        if parts.len() < 3 || !parts[0].eq_ignore_ascii_case(index_code) {
+            continue;
+        }
+        for chunk in parts[1..].chunks(2) {
+            let [stock_code, weight] = chunk else {
+                break;
+            };
+            let Ok(weight) = weight.parse::<f64>() else {
+                continue;
+            };
+            out.insert(stock_code.to_ascii_uppercase(), weight);
+        }
+    }
+
+    if out.is_empty() {
+        return Err(MetadataParseError::NoRecords("sector weight index"));
+    }
+    Ok(out)
+}
+
 /// 解析 xtquant `IndustryData.txt`，返回 `industry -> members`。
 pub fn parse_industry_file(
     path: impl AsRef<Path>,

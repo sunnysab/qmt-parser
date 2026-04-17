@@ -4,8 +4,8 @@ use std::path::PathBuf;
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use qmt_parser::{
-    parse_holiday_file, parse_industry_file, parse_sector_name_file, parse_sector_weight_members,
-    parse_sectorlist_dat,
+    parse_holiday_file, parse_industry_file, parse_sector_name_file, parse_sector_weight_index,
+    parse_sector_weight_members, parse_sectorlist_dat,
 };
 
 fn temp_dir(label: &str) -> PathBuf {
@@ -90,6 +90,25 @@ fn parses_sector_weight_members_file() {
                 vec!["000001.SZ".to_string(), "600000.SH".to_string()]
             ),
             ("000905.SH".to_string(), vec!["600000.SH".to_string()]),
+        ])
+    );
+}
+
+#[test]
+fn parses_sector_weight_index_file() {
+    let root = temp_dir("sector-weight-index");
+    let file = root.join("sectorWeightData.txt");
+    fs::write(
+        &file,
+        "000300.SH;600000.SH;0.42;000001.SZ;0.58;\n000905.SH;600000.SH;0.11;\n",
+    )
+    .expect("write sector weight");
+
+    assert_eq!(
+        parse_sector_weight_index(&file, "000300.SH").expect("parse sector weight index"),
+        BTreeMap::from([
+            ("000001.SZ".to_string(), 0.58),
+            ("600000.SH".to_string(), 0.42),
         ])
     );
 }
