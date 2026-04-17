@@ -358,21 +358,12 @@ pub fn parse_sector_weight_members(
         if line.is_empty() {
             continue;
         }
-        let parts = line
-            .split(';')
-            .map(str::trim)
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>();
-        if parts.len() < 3 {
+        let Some((sector, entries)) = parse_sector_weight_line(line) else {
             continue;
-        }
-        let sector = parts[0].to_ascii_uppercase();
+        };
         let mut stocks = Vec::new();
-        for chunk in parts[1..].chunks(2) {
-            let [stock_code, _weight] = chunk else {
-                break;
-            };
-            stocks.push(stock_code.to_ascii_uppercase());
+        for (stock_code, _weight) in entries {
+            stocks.push(stock_code);
         }
         stocks.sort();
         stocks.dedup();
@@ -412,22 +403,14 @@ pub fn parse_sector_weight_index(
         if line.is_empty() {
             continue;
         }
-        let parts = line
-            .split(';')
-            .map(str::trim)
-            .filter(|part| !part.is_empty())
-            .collect::<Vec<_>>();
-        if parts.len() < 3 || !parts[0].eq_ignore_ascii_case(index_code) {
+        let Some((sector, entries)) = parse_sector_weight_line(line) else {
+            continue;
+        };
+        if !sector.eq_ignore_ascii_case(index_code) {
             continue;
         }
-        for chunk in parts[1..].chunks(2) {
-            let [stock_code, weight] = chunk else {
-                break;
-            };
-            let Ok(weight) = weight.parse::<f64>() else {
-                continue;
-            };
-            out.insert(stock_code.to_ascii_uppercase(), weight);
+        for (stock_code, weight) in entries {
+            out.insert(stock_code, weight);
         }
     }
 
@@ -451,6 +434,59 @@ pub fn load_sector_weight_index_from_root(
 ) -> Result<BTreeMap<String, f64>, MetadataParseError> {
     let roots = vec![root.as_ref().to_path_buf()];
     parse_sector_weight_index(resolve_sector_weight_file_from_roots(&roots)?, index_code)
+}
+
+fn parse_sector_weight_line(line: &str) -> Option<(String, Vec<(String, f64)>)> {
+    let parts = line
+        .split(';')
+        .map(str::trim)
+        .filter(|part| !part.is_empty())
+        .collect::<Vec<_>>();
+    if parts.len() < 2 {
+        return None;
+    }
+
+    let sector = parts[0].to_ascii_uppercase();
+    let mut entries = Vec::new();
+    let mut i = 1;
+
+    while i < parts.len() {
+        if let Some((stock_code, weight)) = parse_compact_weight_entry(parts[i]) {
+            entries.push((stock_code, weight));
+            i += 1;
+            continue;
+        }
+
+        if i + 1 >= parts.len() {
+            break;
+        }
+
+        let stock_code = parts[i].trim();
+        let Ok(weight) = parts[i + 1].trim().parse::<f64>() else {
+            i += 1;
+            continue;
+        };
+        if !stock_code.is_empty() {
+            entries.push((stock_code.to_ascii_uppercase(), weight));
+        }
+        i += 2;
+    }
+
+    if entries.is_empty() {
+        return None;
+    }
+
+    Some((sector, entries))
+}
+
+fn parse_compact_weight_entry(entry: &str) -> Option<(String, f64)> {
+    let (stock_code, weight) = entry.split_once(',')?;
+    let stock_code = stock_code.trim();
+    let weight = weight.trim().parse::<f64>().ok()?;
+    if stock_code.is_empty() {
+        return None;
+    }
+    Some((stock_code.to_ascii_uppercase(), weight))
 }
 
 /// 解析 xtquant `IndustryData.txt`，返回 `industry -> members`。
