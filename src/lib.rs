@@ -84,7 +84,7 @@ pub mod min;
 /// Tick 分笔解析与 DataFrame 导出。
 pub mod tick;
 
-pub use datadir::QmtDataDir;
+pub use datadir::{Market, QmtDataDir, parse_security_code};
 /// 日线 DataFrame 的输出列名。
 pub use day::daily_dataframe_column_names;
 pub use day::{DailyKlineData, DailyReader};

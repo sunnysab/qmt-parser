@@ -130,14 +130,15 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 ### 从 datadir 根目录直接调用解析 API
 
 ```rust
-use qmt_parser::{FileType, QmtDataDir};
+use qmt_parser::{parse_security_code, FileType, Market, QmtDataDir};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     let qmt = QmtDataDir::new("/mnt/data/trade/qmtdata/datadir")?;
+    let (market, symbol) = parse_security_code("000001.SZ")?;
 
-    let ticks = qmt.parse_ticks_to_structs("SZ", "000001", "20250529")?;
-    let mins = qmt.parse_min_to_structs("SZ", "000001")?;
-    let daily = qmt.parse_daily_file_to_structs("SZ", "000001")?;
+    let ticks = qmt.parse_ticks_to_structs(market, &symbol, "20250529")?;
+    let mins = qmt.parse_min_to_structs(Market::Sz, "000001")?;
+    let daily = qmt.parse_daily_file_to_structs(Market::Sz, "000001")?;
     let finance = qmt.read_finance("002419", FileType::BalanceSheet)?;
     let holidays = qmt.load_holidays()?;
 
