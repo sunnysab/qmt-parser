@@ -96,6 +96,9 @@ pub use dividend::{DividendDb, DividendError, DividendRecord};
 pub use error::{DailyParseError, MetadataParseError, MinParseError, TickParseError};
 pub use finance::{FileType, FinanceData, FinanceError, FinanceReader, FinanceRecord, Shareholder};
 pub use metadata::{
+    load_holidays_from_standard_paths, load_industry_from_standard_paths,
+    load_sector_names_from_standard_paths, load_sector_weight_index_from_standard_paths,
+    load_sector_weight_members_from_standard_paths, load_sectorlist_from_standard_paths,
     parse_holiday_file, parse_industry_file, parse_sector_name_file, parse_sector_weight_index,
     parse_sector_weight_members, parse_sectorlist_dat,
 };
