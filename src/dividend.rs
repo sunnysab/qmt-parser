@@ -82,8 +82,10 @@ impl DividendDb {
     /// # }
     /// ```
     pub fn new<P: AsRef<Path>>(path: P) -> Result<Self, DividendError> {
-        let mut options = Options::default();
-        options.create_if_missing = false;
+        let options = Options {
+            create_if_missing: false,
+            ..Options::default()
+        };
 
         match DB::open(path, options) {
             Ok(db) => Ok(Self { db }),
@@ -179,7 +181,7 @@ impl DividendDb {
         let record_date = Self::parse_yyyymmdd_u32(LittleEndian::read_u32(&data[80..84]));
         let ex_dividend_date = Self::parse_yyyymmdd_u32(LittleEndian::read_u32(&data[88..92]))
             .or_else(|| Self::date_from_timestamp_bj(ts_val))
-            .ok_or_else(|| DividendError::InvalidTimestamp(ts_val))?;
+            .ok_or(DividendError::InvalidTimestamp(ts_val))?;
 
         Ok(Some(DividendRecord {
             ex_dividend_date,
@@ -222,8 +224,8 @@ impl DividendDb {
         }
 
         let year = (raw / 10_000) as i32;
-        let month = (raw / 100 % 100) as u32;
-        let day = (raw % 100) as u32;
+        let month = raw / 100 % 100;
+        let day = raw % 100;
         NaiveDate::from_ymd_opt(year, month, day)
     }
 
@@ -392,7 +394,7 @@ fn test_parse_dividend_key_timestamp_rejects_invalid_key() {
 
 #[cfg(test)]
 fn decode_hex(input: &str) -> Result<Vec<u8>, String> {
-    if input.len() % 2 != 0 {
+    if !input.len().is_multiple_of(2) {
         return Err("hex length must be even".to_string());
     }
 

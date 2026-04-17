@@ -1,6 +1,6 @@
 use std::collections::BTreeMap;
 use std::fs;
-use std::path::PathBuf;
+use std::path::{Path, PathBuf};
 use std::time::{SystemTime, UNIX_EPOCH};
 
 use qmt_parser::{
@@ -25,7 +25,7 @@ fn temp_dir(label: &str) -> PathBuf {
     root
 }
 
-fn write_text(root: &PathBuf, relative: &str, content: &str) {
+fn write_text(root: &Path, relative: &str, content: &str) {
     let path = root.join(relative);
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent).expect("create parent");

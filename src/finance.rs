@@ -693,7 +693,7 @@ impl FinanceReader {
     /// 从文件名中解析 TypeId 并映射到枚举
     fn detect_type(path: &Path) -> Result<FileType, FinanceError> {
         let stem = path.file_stem().and_then(|s| s.to_str()).unwrap_or("");
-        let id_part = stem.split('_').last().unwrap_or("");
+        let id_part = stem.split('_').next_back().unwrap_or("");
         let id = id_part
             .parse::<u16>()
             .map_err(|_| FinanceError::Parse("Invalid Filename".into()))?;
@@ -775,39 +775,37 @@ impl FinanceReader {
             let ts2 = LittleEndian::read_i64(&data[cursor + 8..cursor + 16]); // Report
 
             // 只要有一个有效，就尝试解析
-            if Self::is_valid_ts(ts2) {
-                if cursor + stride <= data.len() {
-                    let report_date = Self::ts_to_bj(ts2);
-                    let announce_date = if Self::is_valid_ts(ts1) {
-                        Self::ts_to_bj(ts1)
-                    } else {
-                        report_date
-                    };
+            if Self::is_valid_ts(ts2) && cursor + stride <= data.len() {
+                let report_date = Self::ts_to_bj(ts2);
+                let announce_date = if Self::is_valid_ts(ts1) {
+                    Self::ts_to_bj(ts1)
+                } else {
+                    report_date
+                };
 
-                    let body = &data[cursor + 16..cursor + stride];
-                    let total_holders = Self::read_f64(body, 0).unwrap_or(0.0) as i64;
-                    let a_holders = Self::read_f64(body, 8).unwrap_or(0.0) as i64;
-                    let b_holders = Self::read_f64(body, 16).unwrap_or(0.0) as i64;
-                    let h_holders = Self::read_f64(body, 24).unwrap_or(0.0) as i64;
-                    let float_holders = Self::read_f64(body, 32).unwrap_or(0.0) as i64;
-                    let other_holders = Self::read_f64(body, 40).unwrap_or(0.0) as i64;
+                let body = &data[cursor + 16..cursor + stride];
+                let total_holders = Self::read_f64(body, 0).unwrap_or(0.0) as i64;
+                let a_holders = Self::read_f64(body, 8).unwrap_or(0.0) as i64;
+                let b_holders = Self::read_f64(body, 16).unwrap_or(0.0) as i64;
+                let h_holders = Self::read_f64(body, 24).unwrap_or(0.0) as i64;
+                let float_holders = Self::read_f64(body, 32).unwrap_or(0.0) as i64;
+                let other_holders = Self::read_f64(body, 40).unwrap_or(0.0) as i64;
 
-                    results.push(FinanceRecord {
-                        file_type: FileType::HolderCount,
-                        report_date,
-                        announce_date,
-                        data: FinanceData::HolderCount {
-                            total_holders,
-                            a_holders,
-                            b_holders,
-                            h_holders,
-                            float_holders,
-                            other_holders,
-                        },
-                    });
-                    cursor += stride;
-                    continue;
-                }
+                results.push(FinanceRecord {
+                    file_type: FileType::HolderCount,
+                    report_date,
+                    announce_date,
+                    data: FinanceData::HolderCount {
+                        total_holders,
+                        a_holders,
+                        b_holders,
+                        h_holders,
+                        float_holders,
+                        other_holders,
+                    },
+                });
+                cursor += stride;
+                continue;
             }
             cursor += 8;
         }
@@ -895,7 +893,7 @@ impl FinanceReader {
     }
 
     fn is_valid_ts(ts: i64) -> bool {
-        ts >= MIN_VALID_TS && ts <= MAX_VALID_TS
+        (MIN_VALID_TS..=MAX_VALID_TS).contains(&ts)
     }
 
     /// 将毫秒时间戳转换为北京时间

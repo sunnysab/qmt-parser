@@ -345,15 +345,15 @@ fn parse_record(
         .naive_utc();
 
     let current_date = tz_offset.from_utc_datetime(&dt_utc).date_naive();
-    if let Some(start) = start {
-        if current_date < start {
-            return Ok(None);
-        }
+    if let Some(start) = start
+        && current_date < start
+    {
+        return Ok(None);
     }
-    if let Some(end) = end {
-        if current_date > end {
-            return Ok(None);
-        }
+    if let Some(end) = end
+        && current_date > end
+    {
+        return Ok(None);
     }
 
     let open = cursor.read_u32::<LittleEndian>()? as f64 / PRICE_SCALE;

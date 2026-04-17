@@ -50,8 +50,10 @@ fn write_dividend_db(path: impl AsRef<Path>) {
     let path = path.as_ref();
     fs::create_dir_all(path).expect("create db dir");
 
-    let mut options = Options::default();
-    options.create_if_missing = true;
+    let options = Options {
+        create_if_missing: true,
+        ..Options::default()
+    };
     let mut db = DB::open(path, options).expect("open leveldb");
 
     let key = b"SH|600000|cash|1711929600000";
