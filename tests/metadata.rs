@@ -44,11 +44,8 @@ fn parses_holiday_csv_and_dat() {
 fn parses_sector_name_file() {
     let root = temp_dir("sector-names");
     let file = root.join("systemSectorWeightData.txt");
-    fs::write(
-        &file,
-        "沪深A股;600000.SH;1;\n上证期权;10000001.SHO;1;\n",
-    )
-    .expect("write sector names");
+    fs::write(&file, "沪深A股;600000.SH;1;\n上证期权;10000001.SHO;1;\n")
+        .expect("write sector names");
 
     assert_eq!(
         parse_sector_name_file(&file).expect("parse sector names"),
@@ -117,19 +114,12 @@ fn parses_sector_weight_index_file() {
 fn parses_industry_file() {
     let root = temp_dir("industry");
     let file = root.join("IndustryData.txt");
-    fs::write(
-        &file,
-        "银行,600000.SH,601398.SH\n券商,600030.SH\n",
-    )
-    .expect("write industry");
+    fs::write(&file, "银行,600000.SH,601398.SH\n券商,600030.SH\n").expect("write industry");
 
     assert_eq!(
         parse_industry_file(&file).expect("parse industry"),
         BTreeMap::from([
-            (
-                "券商".to_string(),
-                vec!["600030.SH".to_string()]
-            ),
+            ("券商".to_string(), vec!["600030.SH".to_string()]),
             (
                 "银行".to_string(),
                 vec!["600000.SH".to_string(), "601398.SH".to_string()]

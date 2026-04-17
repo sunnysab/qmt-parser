@@ -127,6 +127,32 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 }
 ```
 
+### 从 datadir 根目录直接调用解析 API
+
+```rust
+use qmt_parser::{FileType, QmtDataDir};
+
+fn main() -> Result<(), Box<dyn std::error::Error>> {
+    let qmt = QmtDataDir::new("/mnt/data/trade/qmtdata/datadir")?;
+
+    let ticks = qmt.parse_ticks_to_structs("SZ", "000001", "20250529")?;
+    let mins = qmt.parse_min_to_structs("SZ", "000001")?;
+    let daily = qmt.parse_daily_file_to_structs("SZ", "000001")?;
+    let finance = qmt.read_finance("002419", FileType::BalanceSheet)?;
+    let holidays = qmt.load_holidays()?;
+
+    println!(
+        "tick={} min={} day={} finance={} holidays={}",
+        ticks.len(),
+        mins.len(),
+        daily.len(),
+        finance.len(),
+        holidays.len()
+    );
+    Ok(())
+}
+```
+
 ## API 结构
 
 - `qmt_parser::tick`
@@ -141,6 +167,8 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   - LevelDB 分红送配查询
 - `qmt_parser::metadata`
   - xtquant 本地资料文件解析
+- `qmt_parser::datadir`
+  - `QmtDataDir` datadir 自动发现入口
 - `qmt_parser::error`
   - Tick / Min / Day 解析错误类型
 

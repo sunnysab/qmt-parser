@@ -2,6 +2,10 @@
 //!
 //! 这些错误主要用于 tick、分钟线和日线三个历史行情解析模块。
 
+use std::path::PathBuf;
+
+use crate::dividend::DividendError;
+use crate::finance::FinanceError;
 use thiserror::Error;
 
 #[cfg(feature = "polars")]
@@ -82,4 +86,41 @@ pub enum DailyParseError {
     #[cfg(feature = "polars")]
     #[error("Polars错误: {0}")]
     Polars(#[from] PolarsError),
+}
+
+/// datadir 自动发现与解析错误。
+#[derive(Debug, Error)]
+pub enum DataDirError {
+    /// datadir 根目录不存在或不是目录。
+    #[error("invalid datadir root: {}", .0.display())]
+    InvalidRoot(PathBuf),
+    /// 输入键值不合法。
+    #[error("invalid datadir input: {0}")]
+    InvalidInput(String),
+    /// 在候选路径中未发现目标文件。
+    #[error("unable to locate {kind}; tried: {tried:?}")]
+    PathNotFound {
+        /// 目标类型名称。
+        kind: &'static str,
+        /// 已尝试的候选路径。
+        tried: Vec<PathBuf>,
+    },
+    /// Tick 解析错误。
+    #[error(transparent)]
+    Tick(#[from] TickParseError),
+    /// 1 分钟线解析错误。
+    #[error(transparent)]
+    Min(#[from] MinParseError),
+    /// 日线解析错误。
+    #[error(transparent)]
+    Daily(#[from] DailyParseError),
+    /// Metadata 解析错误。
+    #[error(transparent)]
+    Metadata(#[from] MetadataParseError),
+    /// 财务解析错误。
+    #[error(transparent)]
+    Finance(#[from] FinanceError),
+    /// 分红数据库错误。
+    #[error(transparent)]
+    Dividend(#[from] DividendError),
 }

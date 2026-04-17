@@ -75,11 +75,38 @@ fn detect_sector_roots() -> Vec<PathBuf> {
 }
 
 fn resolve_holiday_csv() -> Result<PathBuf, MetadataParseError> {
-    for root in detect_holiday_roots() {
+    resolve_holiday_csv_from_roots(&detect_holiday_roots())
+}
+
+fn resolve_holiday_dat() -> Result<PathBuf, MetadataParseError> {
+    resolve_holiday_dat_from_roots(&detect_holiday_roots())
+}
+
+fn resolve_sector_name_files() -> Vec<PathBuf> {
+    resolve_sector_name_files_from_roots(&detect_weight_roots())
+}
+
+fn resolve_sector_weight_file() -> Result<PathBuf, MetadataParseError> {
+    resolve_sector_weight_file_from_roots(&detect_weight_roots())
+}
+
+fn resolve_sectorlist_dat() -> Result<PathBuf, MetadataParseError> {
+    resolve_sectorlist_dat_from_roots(&detect_sector_roots())
+}
+
+fn resolve_industry_file() -> Result<PathBuf, MetadataParseError> {
+    resolve_industry_file_from_roots(&detect_industry_roots())
+}
+
+fn resolve_holiday_csv_from_roots(roots: &[PathBuf]) -> Result<PathBuf, MetadataParseError> {
+    for root in roots {
         if !root.exists() {
             continue;
         }
-        for path in [root.join("holiday.csv"), root.join("holiday").join("holiday.csv")] {
+        for path in [
+            root.join("holiday.csv"),
+            root.join("holiday").join("holiday.csv"),
+        ] {
             if path.exists() {
                 return Ok(path);
             }
@@ -91,12 +118,15 @@ fn resolve_holiday_csv() -> Result<PathBuf, MetadataParseError> {
     )))
 }
 
-fn resolve_holiday_dat() -> Result<PathBuf, MetadataParseError> {
-    for root in detect_holiday_roots() {
+fn resolve_holiday_dat_from_roots(roots: &[PathBuf]) -> Result<PathBuf, MetadataParseError> {
+    for root in roots {
         if !root.exists() {
             continue;
         }
-        for path in [root.join("holiday.dat"), root.join("holiday").join("holiday.dat")] {
+        for path in [
+            root.join("holiday.dat"),
+            root.join("holiday").join("holiday.dat"),
+        ] {
             if path.exists() {
                 return Ok(path);
             }
@@ -108,9 +138,9 @@ fn resolve_holiday_dat() -> Result<PathBuf, MetadataParseError> {
     )))
 }
 
-fn resolve_sector_name_files() -> Vec<PathBuf> {
+fn resolve_sector_name_files_from_roots(roots: &[PathBuf]) -> Vec<PathBuf> {
     let mut out = Vec::new();
-    for root in detect_weight_roots() {
+    for root in roots {
         if !root.exists() {
             continue;
         }
@@ -128,8 +158,8 @@ fn resolve_sector_name_files() -> Vec<PathBuf> {
     out
 }
 
-fn resolve_sector_weight_file() -> Result<PathBuf, MetadataParseError> {
-    for root in detect_weight_roots() {
+fn resolve_sector_weight_file_from_roots(roots: &[PathBuf]) -> Result<PathBuf, MetadataParseError> {
+    for root in roots {
         if !root.exists() {
             continue;
         }
@@ -148,8 +178,8 @@ fn resolve_sector_weight_file() -> Result<PathBuf, MetadataParseError> {
     )))
 }
 
-fn resolve_sectorlist_dat() -> Result<PathBuf, MetadataParseError> {
-    for root in detect_sector_roots() {
+fn resolve_sectorlist_dat_from_roots(roots: &[PathBuf]) -> Result<PathBuf, MetadataParseError> {
+    for root in roots {
         if !root.exists() {
             continue;
         }
@@ -169,8 +199,8 @@ fn resolve_sectorlist_dat() -> Result<PathBuf, MetadataParseError> {
     )))
 }
 
-fn resolve_industry_file() -> Result<PathBuf, MetadataParseError> {
-    for root in detect_industry_roots() {
+fn resolve_industry_file_from_roots(roots: &[PathBuf]) -> Result<PathBuf, MetadataParseError> {
+    for root in roots {
         if !root.exists() {
             continue;
         }
@@ -219,6 +249,14 @@ pub fn load_holidays_from_standard_paths() -> Result<Vec<i64>, MetadataParseErro
         .or_else(|_| resolve_holiday_dat().and_then(parse_holiday_file))
 }
 
+/// 从显式 datadir/root 路径发现并解析节假日文件。
+pub fn load_holidays_from_root(root: impl AsRef<Path>) -> Result<Vec<i64>, MetadataParseError> {
+    let roots = vec![root.as_ref().to_path_buf()];
+    resolve_holiday_csv_from_roots(&roots)
+        .and_then(parse_holiday_file)
+        .or_else(|_| resolve_holiday_dat_from_roots(&roots).and_then(parse_holiday_file))
+}
+
 /// 解析 xtquant split sector 文件，返回 sector 名称列表。
 pub fn parse_sector_name_file(path: impl AsRef<Path>) -> Result<Vec<String>, MetadataParseError> {
     let text = fs::read_to_string(path)?;
@@ -256,6 +294,27 @@ pub fn load_sector_names_from_standard_paths() -> Result<Vec<String>, MetadataPa
     Ok(out)
 }
 
+/// 从显式 datadir/root 路径发现并解析 split sector 文件。
+pub fn load_sector_names_from_root(
+    root: impl AsRef<Path>,
+) -> Result<Vec<String>, MetadataParseError> {
+    let roots = vec![root.as_ref().to_path_buf()];
+    let paths = resolve_sector_name_files_from_roots(&roots);
+    if paths.is_empty() {
+        return load_sectorlist_from_root(root);
+    }
+    let mut out = Vec::new();
+    for path in paths {
+        out.extend(parse_sector_name_file(path)?);
+    }
+    out.sort();
+    out.dedup();
+    if out.is_empty() {
+        return Err(MetadataParseError::NoRecords("sector names"));
+    }
+    Ok(out)
+}
+
 /// 解析 xtquant `sectorlist.DAT`，返回板块名称列表。
 pub fn parse_sectorlist_dat(path: impl AsRef<Path>) -> Result<Vec<String>, MetadataParseError> {
     let bytes = fs::read(path)?;
@@ -277,6 +336,14 @@ pub fn parse_sectorlist_dat(path: impl AsRef<Path>) -> Result<Vec<String>, Metad
 /// 从 xtquant 约定路径自动发现并解析 `sectorlist.DAT`。
 pub fn load_sectorlist_from_standard_paths() -> Result<Vec<String>, MetadataParseError> {
     parse_sectorlist_dat(resolve_sectorlist_dat()?)
+}
+
+/// 从显式 datadir/root 路径发现并解析 `sectorlist.DAT`。
+pub fn load_sectorlist_from_root(
+    root: impl AsRef<Path>,
+) -> Result<Vec<String>, MetadataParseError> {
+    let roots = vec![root.as_ref().to_path_buf()];
+    parse_sectorlist_dat(resolve_sectorlist_dat_from_roots(&roots)?)
 }
 
 /// 解析 xtquant `sectorWeightData.txt`，返回 `sector -> members`。
@@ -319,9 +386,17 @@ pub fn parse_sector_weight_members(
 }
 
 /// 从 xtquant 约定路径自动发现并解析 `sectorWeightData.txt` 成员映射。
-pub fn load_sector_weight_members_from_standard_paths(
-) -> Result<BTreeMap<String, Vec<String>>, MetadataParseError> {
+pub fn load_sector_weight_members_from_standard_paths()
+-> Result<BTreeMap<String, Vec<String>>, MetadataParseError> {
     parse_sector_weight_members(resolve_sector_weight_file()?)
+}
+
+/// 从显式 datadir/root 路径发现并解析 `sectorWeightData.txt` 成员映射。
+pub fn load_sector_weight_members_from_root(
+    root: impl AsRef<Path>,
+) -> Result<BTreeMap<String, Vec<String>>, MetadataParseError> {
+    let roots = vec![root.as_ref().to_path_buf()];
+    parse_sector_weight_members(resolve_sector_weight_file_from_roots(&roots)?)
 }
 
 /// 解析 xtquant `sectorWeightData.txt`，返回指定 index/sector 的 `stock -> weight`。
@@ -369,6 +444,15 @@ pub fn load_sector_weight_index_from_standard_paths(
     parse_sector_weight_index(resolve_sector_weight_file()?, index_code)
 }
 
+/// 从显式 datadir/root 路径发现并解析指定 index/sector 权重映射。
+pub fn load_sector_weight_index_from_root(
+    root: impl AsRef<Path>,
+    index_code: &str,
+) -> Result<BTreeMap<String, f64>, MetadataParseError> {
+    let roots = vec![root.as_ref().to_path_buf()];
+    parse_sector_weight_index(resolve_sector_weight_file_from_roots(&roots)?, index_code)
+}
+
 /// 解析 xtquant `IndustryData.txt`，返回 `industry -> members`。
 pub fn parse_industry_file(
     path: impl AsRef<Path>,
@@ -406,7 +490,15 @@ pub fn parse_industry_file(
 }
 
 /// 从 xtquant 约定路径自动发现并解析 `IndustryData.txt`。
-pub fn load_industry_from_standard_paths(
-) -> Result<BTreeMap<String, Vec<String>>, MetadataParseError> {
+pub fn load_industry_from_standard_paths()
+-> Result<BTreeMap<String, Vec<String>>, MetadataParseError> {
     parse_industry_file(resolve_industry_file()?)
+}
+
+/// 从显式 datadir/root 路径发现并解析 `IndustryData.txt`。
+pub fn load_industry_from_root(
+    root: impl AsRef<Path>,
+) -> Result<BTreeMap<String, Vec<String>>, MetadataParseError> {
+    let roots = vec![root.as_ref().to_path_buf()];
+    parse_industry_file(resolve_industry_file_from_roots(&roots)?)
 }
