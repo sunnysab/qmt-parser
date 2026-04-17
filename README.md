@@ -24,6 +24,13 @@
   - 返回 `Vec<FinanceRecord>`，并附带 `FinanceData` typed 载荷
 - 分红送配 LevelDB
   - 通过 `DividendDb` 查询指定证券的除权除息记录
+- xtquant 本地资料文件
+  - `holiday.csv` / `holiday.dat`
+  - `IndustryData.txt`
+  - `systemSectorWeightData.txt`
+  - `customSectorWeightData.txt`
+  - `sectorlist.DAT`
+  - `sectorWeightData.txt`
 
 ## 安装
 
@@ -132,10 +139,22 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
   - 财务 `.DAT` 自动识别与 typed 记录
 - `qmt_parser::dividend`
   - LevelDB 分红送配查询
+- `qmt_parser::metadata`
+  - xtquant 本地资料文件解析
 - `qmt_parser::error`
   - Tick / Min / Day 解析错误类型
 
 crate 根模块已经重导出了最常用的解析函数和结构体，常见调用可以直接从 `qmt_parser::*` 获取。
+
+## xtquant 本地资料文件
+
+如果你只想复用 xtquant 已经落地到本地的数据文件，可以直接使用：
+
+- `parse_holiday_file`
+- `parse_industry_file`
+- `parse_sector_name_file`
+- `parse_sectorlist_dat`
+- `parse_sector_weight_members`
 
 ## 时间与数值语义
 

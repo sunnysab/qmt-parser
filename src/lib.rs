@@ -64,6 +64,7 @@
 //! - [`day`]：日线解析与派生列处理
 //! - [`finance`]：财务 `.DAT` 解析
 //! - [`dividend`]：分红送配 LevelDB 查询
+//! - [`metadata`]：xtquant 本地资料/板块文件解析
 //! - [`error`]：公共错误类型
 
 /// 日线解析与 DataFrame 导出。
@@ -74,6 +75,8 @@ pub mod dividend;
 pub mod error;
 /// QMT 财务 `.DAT` 解析。
 pub mod finance;
+/// xtquant 本地资料文件解析。
+pub mod metadata;
 /// 1 分钟 K 线解析与 DataFrame 导出。
 pub mod min;
 /// Tick 分笔解析与 DataFrame 导出。
@@ -90,8 +93,12 @@ pub use day::{
     parse_daily_file_to_structs, parse_daily_to_structs, parse_daily_to_structs_in_range,
 };
 pub use dividend::{DividendDb, DividendError, DividendRecord};
-pub use error::{DailyParseError, MinParseError, TickParseError};
+pub use error::{DailyParseError, MetadataParseError, MinParseError, TickParseError};
 pub use finance::{FileType, FinanceData, FinanceError, FinanceReader, FinanceRecord, Shareholder};
+pub use metadata::{
+    parse_holiday_file, parse_industry_file, parse_sector_name_file, parse_sector_weight_members,
+    parse_sectorlist_dat,
+};
 /// 分钟线 DataFrame 的输出列名。
 pub use min::min_dataframe_column_names;
 #[cfg(feature = "polars")]

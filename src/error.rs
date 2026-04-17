@@ -28,6 +28,17 @@ pub enum TickParseError {
     Polars(#[from] PolarsError),
 }
 
+/// xtquant 本地资料文件解析错误。
+#[derive(Debug, Error)]
+pub enum MetadataParseError {
+    /// I/O 失败。
+    #[error("failed to read metadata file: {0}")]
+    Io(#[from] std::io::Error),
+    /// 文件中没有可用记录。
+    #[error("no records parsed from {0}")]
+    NoRecords(&'static str),
+}
+
 /// 1 分钟线解析错误。
 #[derive(Error, Debug)]
 pub enum MinParseError {
