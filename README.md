@@ -38,14 +38,14 @@
 
 ```toml
 [dependencies]
-qmt-parser = "0.1.0"
+qmt-parser = "0.2.1"
 ```
 
 如果你只需要纯 Rust 结构体，不需要 `DataFrame` 输出，可以关闭默认 feature：
 
 ```toml
 [dependencies]
-qmt-parser = { version = "0.1.0", default-features = false }
+qmt-parser = { version = "0.2.1", default-features = false }
 ```
 
 如果你在本地联调，还可以直接用 Git 仓库：
